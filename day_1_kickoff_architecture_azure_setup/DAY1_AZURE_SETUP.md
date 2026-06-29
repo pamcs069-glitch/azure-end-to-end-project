@@ -89,18 +89,41 @@ Protect yourself from surprise charges:
 5. Save
 
 ### 1.3 Install tools on your laptop
-Open a terminal and run:
-```bash
-# Azure CLI
-winget install Microsoft.AzureCLI          # Windows
-brew install azure-cli                     # Mac
 
-# Verify
+#### Windows — Azure CLI
+
+`winget` requires **Windows 10 1709+** with **App Installer** from the Microsoft Store. If `winget` is not recognized, use one of these alternatives instead:
+
+**Option 1 — MSI Installer (simplest, recommended)**
+1. Download the installer: [https://aka.ms/installazurecliwindows](https://aka.ms/installazurecliwindows)
+2. Run the downloaded `.msi` file and follow the prompts
+3. Close and reopen your terminal after installation
+
+**Option 2 — PowerShell (no browser needed)**
+```powershell
+# Run PowerShell as Administrator
+Invoke-WebRequest -Uri https://aka.ms/installazurecliwindows -OutFile AzureCLI.msi
+Start-Process msiexec.exe -ArgumentList '/I AzureCLI.msi /quiet' -Wait
+Remove-Item AzureCLI.msi
+```
+
+**Option 3 — Fix winget first (then install normally)**
+1. Open Microsoft Store → search **App Installer** → click **Update**
+2. Close and reopen PowerShell
+3. Run: `winget install Microsoft.AzureCLI`
+
+#### Mac
+```bash
+brew install azure-cli
+```
+
+#### Verify and login (all platforms)
+```bash
+# Confirm install worked
 az --version
 
-# Login
+# Login — opens a browser window to sign in with your Azure account
 az login
-# A browser window opens — sign in with your Azure account
 az account show   # should show your subscription
 ```
 
