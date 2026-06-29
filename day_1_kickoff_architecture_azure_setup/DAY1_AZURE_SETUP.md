@@ -127,6 +127,61 @@ az login
 az account show   # should show your subscription
 ```
 
+### 1.4 Register Resource Providers (do this before creating any resources)
+
+> **Why this matters:** Azure subscriptions do not have all resource providers enabled by default. If you skip this step you will hit errors like:
+> `MissingSubscriptionRegistration: The subscription is not registered to use namespace 'Microsoft.KeyVault'`
+> Register all providers now — it takes 1–2 minutes and only needs to be done once per subscription.
+
+#### Option A — Via Azure Portal (UI)
+
+1. Go to [https://portal.azure.com](https://portal.azure.com)
+2. In the top search bar, search **Subscriptions** and click it
+3. Click your subscription name (`DataEngineeringDaily`)
+4. In the left menu, scroll down and click **Resource providers** (under Settings)
+5. You will see a long list of providers with their registration state
+6. For each provider below, type its name in the **Filter by name** box, click it, then click **Register** at the top:
+
+| Provider to register | Filter search term |
+|---|---|
+| `Microsoft.KeyVault` | KeyVault |
+| `Microsoft.Storage` | Storage |
+| `Microsoft.Databricks` | Databricks |
+| `Microsoft.EventHub` | EventHub |
+| `Microsoft.DataFactory` | DataFactory |
+| `Microsoft.ManagedIdentity` | ManagedIdentity |
+
+7. After clicking Register for each, refresh the page — status changes from `NotRegistered` → `Registering` → `Registered`
+8. Wait until all 6 show **Registered** before moving to Part 2
+
+> **Tip:** You can register all 6 one after another without waiting — they all register in parallel. Then wait once at the end for all to finish.
+
+#### Option B — Via CLI (CMD / PowerShell)
+
+**Register all 6:**
+```cmd
+az provider register --namespace Microsoft.KeyVault
+az provider register --namespace Microsoft.Storage
+az provider register --namespace Microsoft.Databricks
+az provider register --namespace Microsoft.EventHub
+az provider register --namespace Microsoft.DataFactory
+az provider register --namespace Microsoft.ManagedIdentity
+```
+
+**Wait ~1 minute, then verify all show `Registered`:**
+```cmd
+az provider show --namespace Microsoft.KeyVault --query registrationState -o tsv
+az provider show --namespace Microsoft.Storage --query registrationState -o tsv
+az provider show --namespace Microsoft.Databricks --query registrationState -o tsv
+az provider show --namespace Microsoft.EventHub --query registrationState -o tsv
+az provider show --namespace Microsoft.DataFactory --query registrationState -o tsv
+az provider show --namespace Microsoft.ManagedIdentity --query registrationState -o tsv
+```
+
+All 6 should output `Registered`. If any still shows `Registering`, wait 30 more seconds and re-run that check. Do not proceed until all say `Registered`.
+
+> **Note:** Registration is permanent — you never need to repeat this for the same subscription.
+
 ---
 
 ## Part 2 — Create Resource Group (5 min)
@@ -893,6 +948,7 @@ If you forget, the cluster auto-terminates after 15 minutes — but do not rely 
 ## Day 1 Checklist
 
 - [ ] Budget alert set at ₹1,500/month
+- [ ] All 6 resource providers registered and showing `Registered` (KeyVault, Storage, Databricks, EventHub, DataFactory, ManagedIdentity)
 - [ ] Resource Group `rg-ev-intelligence-dev` created in Central India
 - [ ] Storage Account `evdatalakedev` created (Standard LRS, hierarchical namespace ON)
 - [ ] Containers: `bronze`, `silver`, `gold`, `source` created
@@ -916,6 +972,7 @@ If you forget, the cluster auto-terminates after 15 minutes — but do not rely 
 | Error | Fix |
 |---|---|
 | `az login` fails | Try `az login --use-device-code` |
+| `MissingSubscriptionRegistration` on any resource | Run `az provider register --namespace <e.g. Microsoft.KeyVault>` then wait 1–2 min and retry |
 | Storage account name taken | Add your initials: `evdatalakedevhs` |
 | Key Vault name taken | Add random suffix: `kv-ev-dev-01` |
 | Mount fails with 403 | SP does not have Storage Blob Data Contributor — re-check IAM |
