@@ -585,17 +585,33 @@ To verify it worked:
 > **CMD / PowerShell users:** Variables like `$()` and `$VAR` are bash syntax. Use the step-by-step single-line version below.
 
 **Step-by-step (CMD / PowerShell — run each line separately):**
+
+**Step 1 — get your SP's appId** (the Application/Client ID from Part 5):
+```cmd
+az ad sp list --display-name sp-ev-intelligence-dev --query "[0].appId" -o tsv
+```
+Copy the output — this is your `APP_ID` (looks like `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+
+**Step 2 — get the SP's internal Object ID** (different from appId — Azure uses this for role assignments):
+```cmd
+az ad sp show --id <APP_ID from Step 1> --query id -o tsv
+```
+Copy the output — this is your `SP_OID`
+
+**Step 3 — get the Storage Account resource ID:**
 ```cmd
 az storage account show --name evdatalakedev --resource-group rg-ev-intelligence-dev --query id -o tsv
 ```
-Copy the output (the storage resource ID), then:
+Copy the output — this is your `STORAGE_ID` (looks like `/subscriptions/81dd57e1-.../providers/Microsoft.Storage/storageAccounts/evdatalakedev`)
+
+**Step 4 — assign the role:**
 ```cmd
-az ad sp show --id <appId from earlier> --query id -o tsv
+az role assignment create --assignee-object-id <SP_OID from Step 2> --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" --scope <STORAGE_ID from Step 3>
 ```
-Copy that output (the SP object ID), then:
+
+**Step 5 — verify:**
 ```cmd
-az role assignment create --assignee-object-id <SP_OID> --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" --scope <STORAGE_ID>
-az role assignment list --scope <STORAGE_ID> --query "[].{Role:roleDefinitionName, Principal:principalName}" -o table
+az role assignment list --scope <STORAGE_ID from Step 3> --query "[].{Role:roleDefinitionName, Principal:principalName}" -o table
 ```
 
 **Multi-line (bash / Git Bash only):**
@@ -1013,6 +1029,7 @@ If you forget, the cluster auto-terminates after 15 minutes — but do not rely 
 | `az login` fails | Try `az login --use-device-code` |
 | `MissingSubscriptionRegistration` on any resource | Run `az provider register --namespace <e.g. Microsoft.KeyVault>` then wait 1–2 min and retry |
 | `Forbidden: ForbiddenByRbac` on `az keyvault secret set` | Your account needs `Key Vault Secrets Officer` role — assign it via IAM on the Key Vault, wait 1–2 min, then retry |
+| `Conflict: ObjectIsDeletedButRecoverable` on `az keyvault secret set` | Secret was previously deleted but is still in soft-delete state. Recover it first: `az keyvault secret recover --vault-name kv-ev-intelligence-dev --name "<secret-name>"` then retry the set command. Or purge it: `az keyvault secret purge --vault-name kv-ev-intelligence-dev --name "<secret-name>"` then set fresh |
 | Storage account name taken | Add your initials: `evdatalakedevhs` |
 | Key Vault name taken | Add random suffix: `kv-ev-dev-01` |
 | Mount fails with 403 | SP does not have Storage Blob Data Contributor — re-check IAM |
