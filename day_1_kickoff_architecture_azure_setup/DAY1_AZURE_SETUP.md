@@ -780,15 +780,27 @@ pip install databricks-cli
 
 ---
 
-## Part 7 — Mount ADLS Gen2 in Databricks (10 min)
+## Part 7 — Connect ADLS Gen2 in Databricks (10 min)
 
-> **Cost: ₹0** — mounting is free. You pay only for the cluster time (already running from Part 6).
+> **Cost: ₹0** — connecting to storage is free. You pay only for the cluster time (already running from Part 6).
 
-**Two approaches to connect Databricks to ADLS Gen2 — choose one:**
+**Two ways to connect — pick the one that matches your cluster mode:**
+
+| | Approach A — Mount (Legacy) | Approach B — Direct Access (Modern) |
+|---|---|---|
+| **Cluster mode required** | **Dedicated** only — blocked on Standard/Shared/Serverless | Any mode — Dedicated, Standard, Shared, Serverless |
+| **Status** | Legacy — Databricks recommends against for new code | Current — recommended approach |
+| **Path style** | `/mnt/bronze/folder/file` | `abfss://bronze@evdatalakedev.dfs.core.windows.net/folder/file` |
+| **Persists across restarts?** | No — must re-run mount notebook each restart | No — must re-set Spark config each session (2 cells) |
+| **Unity Catalog compatible** | No | Yes |
+| **Notebook to import** | `00_mount_storage.ipynb` | `00b_connect_storage_no_mount.ipynb` |
+
+> **If you are on a Dedicated cluster:** either approach works. Approach B is recommended for new learners.
+> **If you are on Standard / Shared / Serverless:** use Approach B — mount is not available.
 
 ---
 
-### Approach A — Service Principal OAuth (Recommended — use this)
+### Approach A — Mount using Service Principal OAuth (Legacy)
 
 **What it is:** Databricks presents the Service Principal's Client ID + Client Secret to Azure Entra ID. Azure validates the identity, checks that the SP has the correct RBAC role on the storage account, and issues a short-lived OAuth token. That token is used to access storage. The actual storage account key is never used or exposed.
 
@@ -938,6 +950,125 @@ az keyvault secret set \
 ```
 
 > **Recommendation: Use Approach A (OAuth). Approach B is documented here so you understand what the access key is, where it comes from, and why it is avoided in production.**
+
+---
+
+### Approach C — Direct ABFSS Access Without Mounting (Modern — Recommended for New Learners)
+
+> **Cost: ₹0** — no extra cost vs the mount approach.
+
+**What is this?**
+Instead of mounting containers to `/mnt/bronze`, you configure Spark with OAuth credentials once per session and read/write using full `abfss://` paths directly. No `dbutils.fs.mount()` is ever called.
+
+**Why use this over mounting:**
+- Works on **any** cluster mode — Dedicated, Standard, Shared, and Serverless
+- If you picked Standard or Shared mode, mount is blocked with `Method not whitelisted` — direct access has no such restriction
+- Databricks is officially deprecating `dbutils.fs.mount()` for all new workloads
+- Compatible with Unity Catalog (the future of Databricks governance)
+
+**Path comparison:**
+
+| Mount path (old) | Direct path (new) |
+|---|---|
+| `/mnt/bronze/ev_sessions` | `abfss://bronze@evdatalakedev.dfs.core.windows.net/ev_sessions` |
+| `/mnt/silver/payments` | `abfss://silver@evdatalakedev.dfs.core.windows.net/payments` |
+| `/mnt/gold/summary` | `abfss://gold@evdatalakedev.dfs.core.windows.net/summary` |
+
+The data is identical — only the path syntax changes.
+
+---
+
+### 7.2b Follow the step-by-step guide
+
+> **Full guide with all 6 notebook cells, expected output, and error tables:**
+> `notebooks/00b_CONNECT_STORAGE_NO_MOUNT.md`
+
+**Quick summary of what the guide covers:**
+
+| Cell | What it does |
+|---|---|
+| Cell 1 | Load 4 SP secrets from Key Vault |
+| Cell 2 | Set Spark OAuth config for the storage account |
+| Cell 3 | Define `abfss()` path helper function |
+| Cell 4 | Verify read access to all 4 containers |
+| Cell 5 | Write + read + delete a test file — confirms write access |
+| Cell 6 | Copy-paste read/write patterns for all future notebooks |
+
+**After every cluster restart:** re-run Cells 1, 2, and 3 — the Spark config is per-session (takes ~30 seconds).
+
+---
+
+### Quick-start code (if you prefer not to use the separate guide)
+
+**Step 1 — Create a new notebook** in Databricks, name it `00b_connect_storage_no_mount`, attach to your cluster.
+
+Or **import** `00b_connect_storage_no_mount.ipynb` from the `notebooks/` folder.
+
+**Step 2 — Cell 1: Load secrets**
+```python
+SCOPE = "kv-ev-scope"
+
+storage_account  = dbutils.secrets.get(scope=SCOPE, key="adls-account-name")
+sp_client_id     = dbutils.secrets.get(scope=SCOPE, key="sp-client-id")
+sp_client_secret = dbutils.secrets.get(scope=SCOPE, key="sp-client-secret")
+sp_tenant_id     = dbutils.secrets.get(scope=SCOPE, key="sp-tenant-id")
+
+print(f"Storage account : {storage_account}")
+print(f"SP client ID    : {sp_client_id[:8]}...[REDACTED]")
+print("Secrets loaded — OK")
+```
+
+**Step 3 — Cell 2: Configure Spark OAuth**
+```python
+spark.conf.set(f"fs.azure.account.auth.type.{storage_account}.dfs.core.windows.net", "OAuth")
+spark.conf.set(f"fs.azure.account.oauth.provider.type.{storage_account}.dfs.core.windows.net",
+               "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider")
+spark.conf.set(f"fs.azure.account.oauth2.client.id.{storage_account}.dfs.core.windows.net", sp_client_id)
+spark.conf.set(f"fs.azure.account.oauth2.client.secret.{storage_account}.dfs.core.windows.net", sp_client_secret)
+spark.conf.set(f"fs.azure.account.oauth2.client.endpoint.{storage_account}.dfs.core.windows.net",
+               f"https://login.microsoftonline.com/{sp_tenant_id}/oauth2/token")
+
+print("Spark OAuth config set — OK")
+```
+
+**Step 4 — Cell 3: Path helper + verify**
+```python
+def abfss(container: str, path: str = "") -> str:
+    base = f"abfss://{container}@{storage_account}.dfs.core.windows.net"
+    return f"{base}/{path}" if path else base
+
+# Verify all 4 containers are accessible
+for container in ["bronze", "silver", "gold", "source"]:
+    try:
+        items = dbutils.fs.ls(abfss(container))
+        print(f"  {container:<8} OK — {len(items)} items")
+    except Exception as e:
+        print(f"  {container:<8} ERROR — {e}")
+```
+
+**Expected output:**
+```
+  bronze   OK — 0 items
+  silver   OK — 0 items
+  gold     OK — 0 items
+  source   OK — 0 items
+```
+
+> Empty containers (0 items) are expected on Day 1. This means the connection is working correctly.
+
+**Step 5 — Use `abfss()` for all reads and writes going forward:**
+```python
+# Read a Delta table
+df = spark.read.format("delta").load(abfss("silver", "ev_sessions"))
+
+# Write a Delta table
+df.write.format("delta").mode("overwrite").save(abfss("silver", "ev_sessions"))
+
+# Read a CSV
+df = spark.read.option("header", "true").csv(abfss("source", "uploads/file.csv"))
+```
+
+> **For full error tables, expected output per cell, and write-access verification** — see `notebooks/00b_CONNECT_STORAGE_NO_MOUNT.md`.
 
 ---
 
