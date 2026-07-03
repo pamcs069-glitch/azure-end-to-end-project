@@ -9,9 +9,27 @@
 
 ---
 
+## Do I need to run this every session?
+
+**Yes — but only once per session, and it takes under 30 seconds.**
+
+Spark OAuth config is held in memory. When a cluster restarts or a new session starts, the config is gone. You re-run 3 cells to restore it.
+
+**The smart way to handle this** (covered at the end of this guide) is a single `%run` line at the top of every notebook — one line replaces re-copying 3 cells everywhere.
+
+```
+Every session, in ANY notebook that reads/writes ADLS:
+─────────────────────────────────────────────────────
+  %run ./00b_connect_storage_no_mount           ← one line, done
+─────────────────────────────────────────────────────
+This runs Cells 1–3 automatically. No copy-paste needed.
+```
+
+---
+
 ## What Is This?
 
-Instead of mounting containers to `/mnt/bronze`, `/mnt/silver`, etc., you configure Spark with your Service Principal OAuth credentials **once per session**, then read and write using full `abfss://` paths directly.
+Instead of mounting containers to `/mnt/bronze`, you configure Spark with your Service Principal OAuth credentials **once per session**, then read and write using full `abfss://` paths directly.
 
 No `dbutils.fs.mount()` is ever called.
 
@@ -72,7 +90,7 @@ Before running any cell, confirm all of these are done:
 
 ### Cell 1 — Load secrets from Key Vault
 
-> **What this does:** Reads your 4 SP credentials from Key Vault via the secret scope. Nothing is hardcoded — the values are masked in notebook output automatically.
+> **What this does:** Reads your 4 SP credentials from Key Vault via the secret scope. Nothing is hardcoded — values are masked in notebook output automatically by Databricks.
 
 ```python
 # ── Cell 1: Load secrets from Key Vault ───────────────────────────────────────
@@ -101,7 +119,7 @@ All secrets loaded — OK
 
 | Error | Fix |
 |---|---|
-| `Secret does not exist: adls-account-name` | Secret not added to Key Vault — go to Key Vault → Secrets → add it |
+| `Secret does not exist: adls-account-name` | Secret not added to Key Vault — Key Vault → Secrets → add it |
 | `Secret scope 'kv-ev-scope' does not exist` | Secret scope not created — complete Day 1 Part 6.5 first |
 | `PERMISSION_DENIED: Invalid permissions on KeyVault 403` | `AzureDatabricks` app missing `Key Vault Secrets User` role → Key Vault → IAM → Add that role → wait 2 min |
 
@@ -109,12 +127,11 @@ All secrets loaded — OK
 
 ### Cell 2 — Configure Spark OAuth for your storage account
 
-> **What this does:** Tells Spark: *"when you see paths pointing to `evdatalakedev`, authenticate using this Service Principal via OAuth."* These settings last for this Spark session only — you re-run this cell after every cluster restart (takes 5 seconds).
+> **What this does:** Tells Spark: *"when you see paths for `evdatalakedev`, authenticate using this Service Principal via OAuth."*
+> These settings live in Spark session memory only — gone when the cluster restarts.
 
 ```python
 # ── Cell 2: Set Spark OAuth config for this storage account ───────────────────
-# Scoped to your specific storage account — safe if you connect to multiple accounts later
-
 spark.conf.set(
     f"fs.azure.account.auth.type.{storage_account}.dfs.core.windows.net",
     "OAuth"
@@ -146,29 +163,28 @@ Spark OAuth config set for: evdatalakedev
 You can now read/write using abfss:// paths — no mount needed.
 ```
 
-> **No errors here means Spark accepted the config — it does not test the connection yet.** Actual authentication happens in Cell 4 when you first try to list a container.
+> Cell 2 does **not** test the actual connection — it only sets the config. The real test happens in Cell 4.
 
 ---
 
 ### Cell 3 — Define the path helper function
 
-> **What this does:** Defines a small `abfss()` helper so you never have to type the full storage URL manually in your notebooks. Use this in all future notebooks after running Cells 1 and 2.
+> **What this does:** Defines `abfss()` so you never type the full storage URL manually. Every notebook uses this after running Cells 1 and 2.
 
 ```python
-# ── Cell 3: Path helper — use this in all notebooks ───────────────────────────
+# ── Cell 3: Path helper — use in all notebooks ────────────────────────────────
 def abfss(container: str, path: str = "") -> str:
     """
-    Build a full abfss:// path for a container and optional subfolder/file.
+    Returns a full abfss:// path for a given container and optional subfolder/file.
 
-    Examples:
-        abfss("bronze")                       → abfss://bronze@evdatalakedev.dfs.core.windows.net
-        abfss("silver", "ev_sessions")        → abfss://silver@evdatalakedev.dfs.core.windows.net/ev_sessions
-        abfss("gold", "summary/2026/01/")     → abfss://gold@evdatalakedev...../summary/2026/01/
+    Usage:
+        abfss("bronze")                    → abfss://bronze@evdatalakedev.dfs.core.windows.net
+        abfss("silver", "ev_sessions")     → abfss://silver@evdatalakedev.dfs.core.windows.net/ev_sessions
+        abfss("gold", "summary/2026/01/")  → abfss://gold@evdatalakedev.dfs.core.windows.net/summary/2026/01/
     """
     base = f"abfss://{container}@{storage_account}.dfs.core.windows.net"
     return f"{base}/{path}" if path else base
 
-# Verify — print root path for all 4 containers
 print("Container paths:")
 for container in ["bronze", "silver", "gold", "source"]:
     print(f"  {container:<8} → {abfss(container)}")
@@ -183,11 +199,13 @@ Container paths:
   source   → abfss://source@evdatalakedev.dfs.core.windows.net
 ```
 
+> **Cells 1, 2, 3 are the only cells you re-run every session.** Cells 4 and 5 below are one-time verification steps.
+
 ---
 
-### Cell 4 — Verify read access to all 4 containers
+### Cell 4 — Verify read access to all 4 containers *(run once — first time only)*
 
-> **What this does:** This is your real connection test. It calls `dbutils.fs.ls()` on each container using the abfss path. If OAuth is configured correctly and the SP has the right RBAC role, all 4 will show `OK`. An empty container shows `0 items` — that is expected and fine on Day 1.
+> **What this does:** The real connection test. Calls `dbutils.fs.ls()` on each container. Empty containers show `0 items` — that is expected and correct on Day 1.
 
 ```python
 # ── Cell 4: Verify read access to all 4 containers ───────────────────────────
@@ -195,9 +213,8 @@ print("=== Testing connection to all 4 containers ===\n")
 all_ok = True
 
 for container in ["bronze", "silver", "gold", "source"]:
-    path = abfss(container)
     try:
-        items = dbutils.fs.ls(path)
+        items = dbutils.fs.ls(abfss(container))
         print(f"  {container:<8}  OK — {len(items)} items")
     except Exception as e:
         print(f"  {container:<8}  ERROR — {e}")
@@ -228,43 +245,40 @@ You are ready to read and write data.
 
 | Error | Cause | Fix |
 |---|---|---|
-| `403 Forbidden` / `AuthorizationPermissionMismatch` | SP does not have `Storage Blob Data Contributor` role on `evdatalakedev` | Storage account → **Access Control (IAM)** → confirm SP is listed under that role |
-| `AuthenticationFailed` / `AADSTS7000215` | Wrong `sp-client-secret` value in Key Vault | Key Vault → Secrets → `sp-client-secret` → check the value matches what was shown when you created the SP |
-| `Container not found` | Container name does not exist in storage | Portal → Storage account → Containers → confirm all 4 exist: `bronze`, `silver`, `gold`, `source` |
-| `Forbidden` on Cell 4 but Cell 2 had no error | Cell 2 accepted the config but the SP credentials are wrong | Re-check `sp-client-id` and `sp-tenant-id` values in Key Vault |
+| `403 Forbidden` / `AuthorizationPermissionMismatch` | SP missing `Storage Blob Data Contributor` role | Storage account → **Access Control (IAM)** → confirm SP is assigned that role |
+| `AuthenticationFailed` / `AADSTS7000215` | Wrong `sp-client-secret` in Key Vault | Key Vault → Secrets → `sp-client-secret` → value must match exactly what was shown when you created the SP |
+| `Container not found` | Container doesn't exist | Portal → Storage account → Containers → confirm all 4 exist |
+| Cell 4 fails but Cell 2 had no error | Config set but SP credentials are wrong | Re-check `sp-client-id` and `sp-tenant-id` in Key Vault |
 
 ---
 
-### Cell 5 — Write and read a test file (verify write access)
+### Cell 5 — Write and read a test file *(run once — first time only)*
 
-> **What this does:** Writes a tiny 1-row Parquet file to `bronze/_connection_test/`, reads it back, then deletes it. Confirms the SP has write permission (not just read).
+> **What this does:** Writes a 1-row Parquet file to `bronze/_connection_test/`, reads it back, then deletes it. Confirms write permission.
 
 ```python
-# ── Cell 5: Write + read + delete a test file to confirm write access ─────────
+# ── Cell 5: Write + read + delete a test file ─────────────────────────────────
 from pyspark.sql import Row
 
 test_path = abfss("bronze", "_connection_test/test.parquet")
 
 try:
-    # Step 1: write a tiny DataFrame
     df_test = spark.createDataFrame([Row(status="ok", message="write test passed")])
     df_test.write.mode("overwrite").parquet(test_path)
     print(f"Write OK  → {test_path}")
 
-    # Step 2: read it back
     df_read = spark.read.parquet(test_path)
     df_read.show(truncate=False)
     print("Read  OK  — data matches what was written")
 
-    # Step 3: clean up
     dbutils.fs.rm(abfss("bronze", "_connection_test"), recurse=True)
     print("Cleanup OK — test file deleted")
-    print("\nWrite access confirmed — SP has Storage Blob Data Contributor role.")
+    print("\nWrite access confirmed.")
 
 except Exception as e:
     print(f"ERROR: {e}")
-    print("If 403: SP has read but not write permission.")
-    print("Fix: Storage account → IAM → confirm role is 'Storage Blob Data Contributor', not 'Storage Blob Data Reader'.")
+    print("If 403: role is probably 'Storage Blob Data Reader' not 'Contributor'.")
+    print("Fix: Storage account → IAM → change role to 'Storage Blob Data Contributor'.")
 ```
 
 **Expected output:**
@@ -278,88 +292,132 @@ Write OK  → abfss://bronze@evdatalakedev.dfs.core.windows.net/_connection_test
 Read  OK  — data matches what was written
 Cleanup OK — test file deleted
 
-Write access confirmed — SP has Storage Blob Data Contributor role.
+Write access confirmed.
 ```
 
 ---
 
-### Cell 6 — Quick reference: how to use abfss paths in all future notebooks
-
-> **What this does:** This cell is a reference template. It does not run any real data — just prints examples. Copy the patterns you need into future notebooks.
+### Cell 6 — Read/write reference patterns *(not a runnable cell — copy from here into future notebooks)*
 
 ```python
-# ── Cell 6: Reference — how to use abfss() in future notebooks ────────────────
-# Run Cells 1, 2, 3 at the top of every notebook, then use these patterns:
+# ── Cell 6: Reference patterns — copy these into your actual notebooks ─────────
 
-# ── Reading ────────────────────────────────────────────────────────────────────
+# READ a Delta table from silver
+df = spark.read.format("delta").load(abfss("silver", "ev_sessions"))
 
-# Read a Delta table from silver
-# df = spark.read.format("delta").load(abfss("silver", "ev_sessions"))
+# READ all Parquet files in a bronze folder
+df = spark.read.parquet(abfss("bronze", "api_payments/"))
 
-# Read all Parquet files in a bronze folder
-# df = spark.read.parquet(abfss("bronze", "api_payments/"))
+# READ a CSV from source
+df = spark.read.option("header", "true").csv(abfss("source", "uploads/ev_data.csv"))
 
-# Read a CSV from source
-# df = spark.read.option("header", "true").csv(abfss("source", "uploads/ev_data.csv"))
+# READ nested CSVs (year/month/day/hour folder structure)
+df = spark.read.option("header", "true").csv(
+    abfss("source", "realtime/charging_sessions/*/*/*/*/*.csv")
+)
 
-# Read nested CSVs using glob (e.g. year/month/day/hour structure)
-# df = spark.read.option("header", "true").csv(abfss("source", "realtime/charging_sessions/*/*/*/*/*.csv"))
+# WRITE (overwrite) a Delta table to silver
+df.write.format("delta").mode("overwrite").save(abfss("silver", "ev_sessions"))
 
-# ── Writing ────────────────────────────────────────────────────────────────────
+# WRITE (append) to an existing Delta table
+df.write.format("delta").mode("append").save(abfss("silver", "ev_sessions"))
 
-# Write (overwrite) a Delta table to silver
-# df.write.format("delta").mode("overwrite").save(abfss("silver", "ev_sessions"))
+# WRITE Parquet to bronze
+df.write.mode("append").parquet(abfss("bronze", "api_payments"))
 
-# Append to an existing Delta table
-# df.write.format("delta").mode("append").save(abfss("silver", "ev_sessions"))
-
-# Write Parquet to bronze (raw landing zone)
-# df.write.mode("append").parquet(abfss("bronze", "api_payments"))
-
-# ── Checking what is in a folder ───────────────────────────────────────────────
-
-# List files in bronze
-# display(dbutils.fs.ls(abfss("bronze")))
-
-# List files inside a specific subfolder
-# display(dbutils.fs.ls(abfss("silver", "ev_sessions")))
-
-# ── Equivalent mount vs direct path ───────────────────────────────────────────
-print("Mount path  (old) : /mnt/bronze/ev_sessions")
-print(f"Direct path (new) : {abfss('bronze', 'ev_sessions')}")
-print()
-print("Both point to the same data. Direct path is the modern standard.")
-```
-
-**Expected output:**
-```
-Mount path  (old) : /mnt/bronze/ev_sessions
-Direct path (new) : abfss://bronze@evdatalakedev.dfs.core.windows.net/ev_sessions
-
-Both point to the same data. Direct path is the modern standard.
+# LIST files in a container or subfolder
+display(dbutils.fs.ls(abfss("bronze")))
+display(dbutils.fs.ls(abfss("silver", "ev_sessions")))
 ```
 
 ---
 
-## After Every Cluster Restart
+## Using This in Every Other Notebook (The Right Way)
 
-Spark config is **not** persisted across cluster restarts. Each time your cluster restarts (or you start a new session), run these 3 cells before any read/write:
+Instead of copy-pasting Cells 1–3 into every notebook, use `%run` to call this notebook from any other notebook. One line at the top does everything.
 
-1. **Cell 1** — load secrets from Key Vault
-2. **Cell 2** — set Spark OAuth config
-3. **Cell 3** — re-define the `abfss()` helper
+### Step 1 — Make sure `00b_connect_storage_no_mount` is saved in your Databricks Workspace
 
-This takes under 30 seconds and replaces the old "re-run the mount notebook" step.
+It must be saved in a known path, for example:
+```
+/Users/your-email@domain.com/00b_connect_storage_no_mount
+```
+or a shared folder:
+```
+/Shared/ev-project/00b_connect_storage_no_mount
+```
+
+### Step 2 — Add this as the first cell in every notebook that uses ADLS
+
+```python
+# ── Always run this first — sets up storage auth for this session ──────────────
+%run "./00b_connect_storage_no_mount"
+```
+
+> Use a **relative path** (`./`) if the notebooks are in the same folder.
+> Use a **full workspace path** if they are in different folders:
+> ```python
+> %run "/Shared/ev-project/00b_connect_storage_no_mount"
+> ```
+
+### What `%run` does
+
+`%run` executes the entire target notebook in the **same Spark session** as the calling notebook. That means:
+- All variables (`storage_account`, `sp_client_id`, etc.) become available
+- The `abfss()` function is available
+- The Spark OAuth config is set
+
+After that one line, you can immediately read and write:
+
+```python
+# Cell 2 of your actual notebook — storage is already configured by %run above
+df = spark.read.format("delta").load(abfss("silver", "ev_sessions"))
+df.show()
+```
+
+### Full example — what a Day 2+ notebook looks like
+
+```python
+# ── Cell 1: Init storage (always first) ───────────────────────────────────────
+%run "./00b_connect_storage_no_mount"
+
+# ── Cell 2: Your actual work starts here ──────────────────────────────────────
+# Storage is ready — use abfss() directly
+
+df_bronze = spark.read.parquet(abfss("bronze", "api_payments/"))
+print(f"Rows in bronze payments: {df_bronze.count():,}")
+
+# ── Cell 3: Write cleaned data to silver ──────────────────────────────────────
+df_silver = df_bronze.dropDuplicates(["payment_id"])
+df_silver.write.format("delta").mode("overwrite").save(abfss("silver", "payments"))
+print("Written to silver — OK")
+```
 
 ---
 
 ## Summary
 
-| Step | Cell | What it does | Must re-run after restart? |
+### Which cells to run and when
+
+| Cell | What it does | Run every session? | Run every notebook? |
 |---|---|---|---|
-| Load secrets | Cell 1 | Reads SP credentials from Key Vault | Yes |
-| Configure Spark | Cell 2 | Sets OAuth auth for the storage account | Yes |
-| Path helper | Cell 3 | Defines `abfss()` shortcut function | Yes |
-| Verify read | Cell 4 | Lists all 4 containers — confirms OAuth works | Optional (for peace of mind) |
-| Verify write | Cell 5 | Writes + deletes a test file | Optional (first time only) |
-| Reference | Cell 6 | Copy-paste patterns for future notebooks | No — just a reference |
+| Cell 1 | Load secrets from Key Vault | Yes | Yes (or use `%run`) |
+| Cell 2 | Set Spark OAuth config | Yes | Yes (or use `%run`) |
+| Cell 3 | Define `abfss()` helper | Yes | Yes (or use `%run`) |
+| Cell 4 | Verify read access to all 4 containers | No — first time only | No |
+| Cell 5 | Verify write access (test file) | No — first time only | No |
+| Cell 6 | Reference read/write patterns | No — just copy from it | No |
+
+### The minimal session checklist
+
+Every time you open Databricks and want to work with ADLS:
+
+```
+1. Start your cluster (if not already running)
+2. Open any notebook
+3. Add "%run ./00b_connect_storage_no_mount" as the first cell
+4. Run it
+5. Done — abfss() is available, storage is connected
+```
+
+That's it. No re-mounting, no re-pasting credentials, no extra setup.
