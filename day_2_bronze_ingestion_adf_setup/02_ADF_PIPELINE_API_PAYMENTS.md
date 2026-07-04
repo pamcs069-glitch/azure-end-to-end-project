@@ -1,11 +1,11 @@
-# 02 — ADF Pipeline: API Payments → Bronze Delta
+# 02 — ADF Pipeline: API Payments → Bronze JSON
 **Day 2 | Step 2 of 4**
 
 Build an ADF pipeline that:
 1. Logs in to VoltGrid API → gets a token
 2. On first run: loads ALL payments pages (full load)
 3. On subsequent runs: loads only pages where `updated_at > last_watermark` (incremental)
-4. Writes every page to `bronze/api/payments/` as a Delta table in ADLS Gen2
+4. Writes every page as a JSON file to `bronze/api/payments/raw/ingestion_date={date}/` in ADLS Gen2
 5. Writes the new high-watermark to `pipeline_audit` after a successful run
 
 ---
@@ -25,7 +25,7 @@ pl_bronze_api_payments
 │
 ├── Step 5: Until Activity       Loop while v_current_page <= v_total_pages
 │   └── Step 5a: Copy Activity   GET /api/db/payments/?updated_after={wm}&page={n}
-│                                → append each page to Bronze Delta table
+│                                → write each page as JSON to bronze/api/payments/raw/ingestion_date={date}/page_{n}.json
 │   └── Step 5b: Set Variable    Increment v_current_page by 1
 │
 └── Step 6: Notebook Activity    Write new watermark to pipeline_audit table
@@ -84,37 +84,52 @@ Response:
 
 ---
 
-### Dataset 2: Bronze Payments CSV Sink (`ds_bronze_payments_sink`)
+### Dataset 2: Bronze Payments JSON Sink (`ds_bronze_payments_sink`)
 
-**Why CSV and not Delta?**
-ADF's Copy Activity does not have a Delta format option in the dataset picker. The simplest and most reliable approach is to land the data as JSON/CSV in the Bronze layer first. The Databricks notebook (`03_bronze_api_payments.ipynb`) then reads those files and writes them as a proper Delta table. Bronze layer = raw landing zone, any format is fine here.
+**Why JSON?**
+ADF's Copy Activity has no Delta format option. JSON is the best Bronze sink for API data because it stores the API response exactly as received — no flattening, no data loss, no schema assumptions. The Databricks notebook (`03_bronze_api_payments.ipynb`) reads these JSON files and writes them as a proper Delta table.
+
+**Why not CSV?**
+CSV flattens the structure and can silently drop nested fields or mishandle special characters in values. JSON preserves the original API response exactly — this is what "store as-is in Bronze" means.
 
 **Flow:**
 ```
-ADF Copy Activity  →  bronze/api/payments/raw/  (CSV files)
+ADF Copy Activity
+  → bronze/api/payments/raw/ingestion_date=2026-07-04/page_001.json   (raw JSON, one file per page)
+  → bronze/api/payments/raw/ingestion_date=2026-07-04/page_002.json
+  → ...
                                 ↓
-Databricks notebook  →  bronze/api/payments/delta/  (Delta table)
+Databricks notebook
+  → bronze/api/payments/delta/  (Delta table, deduplicated by payment_id in Silver)
 ```
+
+Partitioning by `ingestion_date` means each daily run writes to its own folder — no file overwrites, clean separation of full load vs incremental runs.
 
 **UI Steps:**
 
 1. **Datasets** → **+ New dataset**
 2. Search `Azure Data Lake Storage Gen2` → **Continue**
-3. Search `DelimitedText` → **DelimitedText** → **Continue**
+3. Search `JSON` → select **JSON** → **Continue**
 4. Fill in:
    - **Name:** `ds_bronze_payments_sink`
    - **Linked service:** `ls_adls_bronze`
    - **File path (Container):** `bronze`
-   - **File path (Directory):** `api/payments/raw`
-   - **File path (File):** leave blank
+   - **File path (Directory):** click **Add dynamic content** → paste:
+     ```
+     api/payments/raw/ingestion_date=@{formatDateTime(utcNow(),'yyyy-MM-dd')}
+     ```
+   - **File path (File):** click **Add dynamic content** → paste:
+     ```
+     page_@{padStart(string(variables('v_current_page')),3,'0')}.json
+     ```
 5. **Connection** tab:
-   - **Column delimiter:** Comma (`,`)
-   - **First row as header:** checked (ON)
+   - **File pattern:** `Set of objects`
+   - **Encoding:** `UTF-8`
    - **Compression type:** None
 6. Click **OK**
 7. Click **Publish all**
 
-> ADF writes one CSV file per page into `bronze/api/payments/raw/`. The Databricks notebook reads all CSVs from that folder and writes them as a Delta table to `bronze/api/payments/delta/`.
+> ADF writes one JSON file per page, e.g. `page_001.json`, `page_002.json`. The file name uses zero-padded page number so files sort correctly (001, 002 ... 125). The Databricks notebook reads all JSON files from `raw/` and writes Delta to `bronze/api/payments/delta/`.
 
 ---
 
@@ -126,11 +141,12 @@ Databricks notebook  →  bronze/api/payments/delta/  (Delta table)
 2. **Name:** `pl_bronze_api_payments`
 3. Go to **Parameters** tab → **+ New**:
    - `p_load_type` | Type: String | Default: `incremental`
-4. Go to **Variables** tab → **+ New** — add these 4 variables:
+4. Go to **Variables** tab → **+ New** — add these 5 variables:
    - `v_token` | Type: String
    - `v_watermark` | Type: String
    - `v_current_page` | Type: Integer | Default: 1
    - `v_total_pages` | Type: Integer | Default: 1
+   - `v_ingestion_date` | Type: String
 
 ---
 
@@ -204,6 +220,19 @@ For Day 2, use a fixed watermark value. In Day 8 (ADF Orchestration) you will wi
 
 ---
 
+### Step 4b — Set Variable: Set ingestion date
+
+This captures today's date once at pipeline start — all pages written in this run share the same `ingestion_date` folder, keeping the run atomic.
+
+1. Add **Set Variable** activity after `act_set_watermark`
+2. **Name:** `act_set_ingestion_date`
+3. **Variable:** `v_ingestion_date`
+4. **Value** (dynamic content): `@{formatDateTime(utcNow(),'yyyy-MM-dd')}`
+
+Connect: `act_set_watermark` → `act_set_ingestion_date`
+
+---
+
 ### Step 5 — Until Activity: Paginate all pages
 
 1. Add **Until** activity after `act_set_watermark`
@@ -239,30 +268,17 @@ For Day 2, use a fixed watermark value. In Day 8 (ADF Orchestration) you will wi
 > This pagination rule reads `total_pages` from the first response and stores it in `v_total_pages`. The Until loop uses that to know when to stop.
 
 **Sink tab:**
-- Dataset: `ds_bronze_payments_delta`
-- **Write behavior:** Append
-- **Pre-copy script:** (leave empty)
+- Dataset: `ds_bronze_payments_sink`
+- **File name option:** `File name from dataset` (uses the dynamic `page_001.json` expression you set in the dataset)
+- **Write behavior:** `Add dynamic content` is not needed here — the dataset file path already includes `v_current_page`
 
-**Mapping tab → Collection reference:**
+> **Note:** The dataset's File path (Directory) uses `formatDateTime(utcNow(),'yyyy-MM-dd')` — this resolves at runtime to today's date, e.g. `api/payments/raw/ingestion_date=2026-07-04/`. Every page in this pipeline run lands in the same dated folder.
 
-Click **Import schemas** — if it fails due to auth, set manually:
-- **Collection reference:** `$.data`
+**Mapping tab:**
 
-Then add the column mappings:
+Leave mapping as **Auto mapping** — do not add any column mappings.
 
-| Source path (from `data[]`) | Destination column | Type |
-|---|---|---|
-| payment_id | payment_id | String |
-| session_id | session_id | String |
-| customer_id | customer_id | String |
-| gateway | gateway | String |
-| amount_aud | amount_aud | Double |
-| gst | gst | Double |
-| payment_mode | payment_mode | String |
-| status | status | String |
-| processed_at | processed_at | String |
-| created_at | created_at | String |
-| updated_at | updated_at | String |
+JSON sink in ADF writes the full response body as-is. There is nothing to map — the entire JSON object from the API goes into the file unchanged. Column mapping is only for CSV/tabular sinks where you need to control which fields land in which column.
 
 #### 5b — Set Variable: Increment page
 
@@ -407,19 +423,29 @@ az datafactory pipeline-run query-by-factory --resource-group rg-ev-intelligence
 
 ## Verify in ADLS (Databricks)
 
-After the pipeline runs, check Bronze Delta files exist:
+After the pipeline runs, check JSON files landed correctly:
 
 ```python
-display(dbutils.fs.ls(abfss("bronze", "api/payments/")))
+display(dbutils.fs.ls("abfss://bronze@evdatalakedev.dfs.core.windows.net/api/payments/raw/"))
 ```
 
-Expected output: `_delta_log/` folder and `part-*.parquet` files.
+Expected output: one folder per run date, e.g. `ingestion_date=2026-07-04/`
 
 ```python
-df = spark.read.format("delta").load(abfss("bronze", "api/payments/"))
-print(f"Total rows: {df.count():,}")
-display(df.limit(5))
+display(dbutils.fs.ls("abfss://bronze@evdatalakedev.dfs.core.windows.net/api/payments/raw/ingestion_date=2026-07-04/"))
 ```
+
+Expected output: `page_001.json`, `page_002.json` ... one file per API page.
+
+```python
+df_raw = spark.read.option("multiLine", "true").json(
+    "abfss://bronze@evdatalakedev.dfs.core.windows.net/api/payments/raw/ingestion_date=2026-07-04/"
+)
+print(f"Pages loaded: {df_raw.count()}")
+display(df_raw.limit(3))
+```
+
+Expected: each row is one full API page response with `data` array and `pagination` object — exactly as the API returned it. The Databricks notebook (`03_bronze_api_payments.ipynb`) explodes the `data` array and writes individual payment records as a Delta table to `bronze/api/payments/delta/`.
 
 ---
 
@@ -429,8 +455,9 @@ display(df.limit(5))
 |---|---|---|
 | `401 Unauthorized` from login Web Activity | Username or password secret wrong in Key Vault | Check `voltgrid-username` and `voltgrid-password` values in Key Vault |
 | `Until loop runs forever` | `v_total_pages` variable not updated from pagination rule | Check pagination rule — JSON path must be `$.pagination.total_pages` and variable must be `v_total_pages` |
-| `Copy writes 0 rows` | Collection reference wrong — data is under `data[]` not root | In Mapping tab, set Collection reference to `$.data` |
-| `Delta write fails: 403` | ADF MI missing `Storage Blob Data Contributor` on `evdatalakedev` | Day 2 Part 2 — assign the role, wait 2 min, retry |
+| `Copy writes 0 rows` | Source REST dataset returning empty response | Check `p_updated_after` watermark — if too recent, no records exist; try with `1900-01-01T00:00:00Z` |
+| `JSON write fails: 403` | ADF MI missing `Storage Blob Data Contributor` on `evdatalakedev` | Day 2 Part 2 — assign the role, wait 2 min, retry |
+| `All page files named page_000.json` | `v_current_page` variable not incrementing | Check `act_increment_page` is connected on Success after `act_copy_payments_page` inside the Until |
 | `Key Vault access denied` in Web Activity | ADF MI missing `Key Vault Secrets User` on Key Vault | Day 2 Part 3 — assign the role, wait 2 min, retry |
 | `Notebook activity fails: cluster not running` | `dev-cluster` was terminated | Start `dev-cluster` first, or switch to Job cluster in `ls_databricks` |
 
