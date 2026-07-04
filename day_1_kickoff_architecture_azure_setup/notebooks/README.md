@@ -1,6 +1,9 @@
 # Day 1 Notebooks
 
-Three notebooks to run in order during Day 1. Import them into Databricks directly.
+Four notebooks for Day 1. Import them into Databricks directly.
+
+> **Storage connection — use the modern direct access approach:**
+> - `00b_connect_storage_no_mount.ipynb` — SP OAuth direct access, no mount (works in all cluster modes including Shared and Serverless)
 
 ## How to Import into Databricks
 
@@ -18,19 +21,21 @@ Repeat for each `.ipynb` file below.
 
 | # | File | Part in DAY1_AZURE_SETUP.md | What it does |
 |---|---|---|---|
-| 1 | `00_mount_storage.ipynb` | Part 7.2 | Mounts bronze/silver/gold/source containers using SP OAuth |
+| 1 | `00b_connect_storage_no_mount.ipynb` | Part 7.2 | SP OAuth direct access — no mount, works in all cluster modes |
 | 2 | `01_verify_api_auth.ipynb` | Part 7.3 | Tests VoltGrid API login, scans all 18 endpoints, runs noise check |
 | 3 | `02_read_source_blob.ipynb` | Part 7.4 | Reads shared source blob data using SAS token |
+
+Run in order 1 → 2 → 3.
 
 ---
 
 ## Before Running
 
-- Cluster must be **started** and Access mode must be **Dedicated**
+- Cluster must be **started** — any cluster mode works (Dedicated, Standard, Shared, Serverless)
 - Secret scope `kv-ev-scope` must be created (Day 1 Part 6.5)
 - All Key Vault secrets must exist (Day 1 Part 4 + 5)
-- For `02_read_source_blob.py` — paste the SAS token provided during the session into Cell 1
+- For `02_read_source_blob.ipynb` — SAS token secrets must be added to Key Vault (Day 1 Part 7.4.1)
 
 ## Re-running After Cluster Restart
 
-Run `00_mount_storage.py` again after every cluster restart — mounts are not persisted across cluster lifecycles.
+Re-run Cells 1–3 of `00b_connect_storage_no_mount.ipynb` after every cluster restart — the Spark OAuth config is per-session and must be reset each time. Or add `%run "./00b_connect_storage_no_mount"` as Cell 1 in any notebook that accesses ADLS.
