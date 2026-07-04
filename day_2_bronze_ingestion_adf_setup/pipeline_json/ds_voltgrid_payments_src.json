@@ -13,16 +13,12 @@
       "p_page_size": {
         "type": "int",
         "defaultValue": 100
-      },
-      "p_updated_after": {
-        "type": "string",
-        "defaultValue": ""
       }
     },
     "type": "RestResource",
     "typeProperties": {
       "relativeUrl": {
-        "value": "@concat('/api/db/payments/?page=', string(dataset().p_page), '&page_size=', string(dataset().p_page_size), if(empty(dataset().p_updated_after), '', concat('&updated_after=', dataset().p_updated_after)))",
+        "value": "@concat('/api/db/payments/?page=', string(dataset().p_page), '&page_size=', string(dataset().p_page_size))",
         "type": "Expression"
       }
     }

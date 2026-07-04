@@ -130,8 +130,7 @@
               "p_page_size": {
                 "value": "@pipeline().parameters.p_page_size",
                 "type": "Expression"
-              },
-              "p_updated_after": ""
+              }
             }
           }
         ],
