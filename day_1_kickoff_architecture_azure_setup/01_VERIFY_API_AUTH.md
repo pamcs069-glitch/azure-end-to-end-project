@@ -36,6 +36,27 @@ Next run      → fresh login → fresh token
 
 ---
 
+## API Response Structure
+
+Every list endpoint returns this JSON shape:
+
+```json
+{
+  "data": [ { ...record... }, { ...record... } ],
+  "pagination": {
+    "page": 1,
+    "page_size": 5,
+    "total": 125430,
+    "total_pages": 25086
+  }
+}
+```
+
+- `"data"` — the list of records (NOT `"results"`)
+- `"pagination"` — metadata about the full dataset
+
+---
+
 ## Key Terms
 
 ### `import requests`
@@ -186,7 +207,8 @@ API login — OK
 - `?page=1&page_size=5` — URL query parameters: fetch only page 1 with 5 records. Keeps the response small — we only want to verify access, not download everything.
 - `data.get("pagination", {})` — safely gets the `pagination` key from the response dict. Returns an empty dict `{}` if the key does not exist, so the next `.get()` calls don't crash.
 - `pg.get("total", "N/A")` — gets the total record count. Falls back to `"N/A"` if missing.
-- Looping over `data["results"][0].items()` — prints every key-value pair of the first record so you can see the data shape.
+- `data.get("data", [])` — gets the list of records using the key `"data"` (not `"results"` — that is a common mistake from other APIs like Django REST Framework).
+- Looping over `records[0].items()` — prints every key-value pair of the first record so you can see the data shape.
 
 ```python
 r = requests.get(
@@ -201,11 +223,12 @@ pg = data.get("pagination", {})
 print(f"Total records        : {pg.get('total', 'N/A'):,}")
 print(f"Total pages          : {pg.get('total_pages', 'N/A'):,}")
 print(f"Page size            : {pg.get('page_size', 'N/A')}")
-print(f"Records in this page : {len(data.get('results', []))}")
+print(f"Records in this page : {len(data.get('data', []))}")
 
 print(f"\nSample record:")
-if data.get("results"):
-    for k, v in data["results"][0].items():
+records = data.get("data", [])
+if records:
+    for k, v in records[0].items():
         print(f"  {k:<25} : {v}")
 
 print("\nPayments API call — OK")
@@ -315,8 +338,8 @@ All 18 endpoints reachable — API auth verified.
 
 **Line by line:**
 - `page_size=500` — fetch 500 records in one call for the noise check sample.
-- `r.json().get("results", [])` — gets the list of record dicts. Falls back to empty list `[]` if the key is missing.
-- `if not recs` — guards against an empty list before dividing. Without this check, `len(neg_amount) / len(recs)` crashes with `ZeroDivisionError` when the API returns 0 records (e.g. token expired or Cell 2 was not run first).
+- `r.json().get("data", [])` — gets the list of records using the key `"data"`. The VoltGrid API wraps all lists under `"data"`, not `"results"`. Falls back to `[]` if missing.
+- `if not recs` — guards against an empty list before dividing. Without this, `len(neg_amount) / len(recs)` crashes with `ZeroDivisionError` when 0 records come back (e.g. token expired or wrong key name).
 - `total = len(recs)` — stored once so all three percentage calculations divide by the same value.
 - `float(x.get("amount_aud", 0) or 0)` — gets the amount value. The `or 0` handles `None` (if `amount_aud` is null, `None or 0` gives `0`). Then cast to `float` for comparison.
 - List comprehensions — a compact way to filter a list. `[x for x in recs if condition]` returns only items where the condition is True.
@@ -329,12 +352,12 @@ r = requests.get(
     timeout=30,
 )
 r.raise_for_status()
-recs = r.json().get("results", [])
+recs = r.json().get("data", [])
 
 if not recs:
     print("ERROR: No records returned from payments endpoint.")
-    print("  → Check that Cell 2 ran and API_HEADERS is set.")
-    print("  → Check that the payments endpoint returned results in Cell 3.")
+    print("  → Check the raw response keys: print(r.json().keys())")
+    print("  → Re-run Cell 2 to get a fresh token and try again.")
 else:
     VALID_STATUS = {"Success", "Failed", "Pending", "Retry", "Refunded", "Disputed"}
 
