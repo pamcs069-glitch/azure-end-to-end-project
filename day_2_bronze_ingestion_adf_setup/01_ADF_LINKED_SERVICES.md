@@ -84,6 +84,11 @@ ADF's REST linked service lets Copy Activity call HTTP endpoints directly. The b
 **Why Anonymous auth?**
 Authentication is Anonymous at the linked service level because we handle the VoltGrid token ourselves inside the pipeline: Web Activity calls `POST /api/auth/login/` → stores the token in a pipeline variable → Copy Activity attaches it as an `Authorization: Token` header. ADF's built-in auth does not support this token-rotation pattern.
 
+**Why not use Key Vault for the Base URL here?**
+This is a known ADF limitation: when Authentication type is set to **Anonymous**, the Base URL field does not show a Key Vault reference option — it only accepts plain text. Key Vault references for Base URL are only available with certain auth types (Basic, Service Principal).
+
+This is fine for the VoltGrid API URL because the base URL (`https://ev-project-navy-mu.vercel.app`) is not a secret — it is a public endpoint. Only the username, password, and runtime token are sensitive. Those never touch the linked service — they travel only through pipeline variables set by the Web Activity login call.
+
 ---
 
 ### UI Steps
@@ -92,10 +97,9 @@ Authentication is Anonymous at the linked service level because we handle the Vo
 2. Search `REST` → select **REST** → **Continue**
 3. Fill in:
    - **Name:** `ls_voltgrid_api`
-   - **Base URL:** click **Azure Key Vault** radio button next to the field
-     - Linked service: `ls_keyvault`
-     - Secret name: `voltgrid-api-base-url`
+   - **Base URL:** paste directly → `https://ev-project-navy-mu.vercel.app`
    - **Authentication type:** Anonymous
+   - **Server certificate validation:** Enable
 4. Click **Test connection** → **Connection successful**
 5. Click **Create**
 
