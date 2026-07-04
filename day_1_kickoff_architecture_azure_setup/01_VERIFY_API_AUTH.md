@@ -315,10 +315,12 @@ All 18 endpoints reachable — API auth verified.
 
 **Line by line:**
 - `page_size=500` — fetch 500 records in one call for the noise check sample.
-- `r.json().get("results", [])` — gets the list of record dicts. Falls back to empty list `[]` if missing so the list comprehensions below don't crash.
-- `float(x.get("amount_aud", 0) or 0)` — gets the amount value. The `or 0` handles `None` values (if `amount_aud` is null, `None or 0` gives `0`). Then cast to `float` for comparison.
-- List comprehensions — a compact way to filter a list. `[x for x in recs if condition]` returns only the items where condition is True.
-- `VALID_STATUS` — the set of known good status values. Using a `set` (not a list) makes the `in` check faster.
+- `r.json().get("results", [])` — gets the list of record dicts. Falls back to empty list `[]` if the key is missing.
+- `if not recs` — guards against an empty list before dividing. Without this check, `len(neg_amount) / len(recs)` crashes with `ZeroDivisionError` when the API returns 0 records (e.g. token expired or Cell 2 was not run first).
+- `total = len(recs)` — stored once so all three percentage calculations divide by the same value.
+- `float(x.get("amount_aud", 0) or 0)` — gets the amount value. The `or 0` handles `None` (if `amount_aud` is null, `None or 0` gives `0`). Then cast to `float` for comparison.
+- List comprehensions — a compact way to filter a list. `[x for x in recs if condition]` returns only items where the condition is True.
+- `VALID_STATUS` — the set of known good status values. A `set` makes the `in` check faster than a list.
 
 ```python
 r = requests.get(
@@ -329,25 +331,31 @@ r = requests.get(
 r.raise_for_status()
 recs = r.json().get("results", [])
 
-VALID_STATUS = {"Success", "Failed", "Pending", "Retry", "Refunded", "Disputed"}
+if not recs:
+    print("ERROR: No records returned from payments endpoint.")
+    print("  → Check that Cell 2 ran and API_HEADERS is set.")
+    print("  → Check that the payments endpoint returned results in Cell 3.")
+else:
+    VALID_STATUS = {"Success", "Failed", "Pending", "Retry", "Refunded", "Disputed"}
 
-neg_amount  = [x for x in recs if float(x.get("amount_aud", 0) or 0) < 0]
-zero_amount = [x for x in recs if float(x.get("amount_aud", 0) or 0) == 0]
-bad_status  = [x for x in recs if x.get("status", "") not in VALID_STATUS]
+    neg_amount  = [x for x in recs if float(x.get("amount_aud", 0) or 0) < 0]
+    zero_amount = [x for x in recs if float(x.get("amount_aud", 0) or 0) == 0]
+    bad_status  = [x for x in recs if x.get("status", "") not in VALID_STATUS]
 
-print(f"Noise check on {len(recs)} payment records:\n")
-print(f"  Negative amounts  : {len(neg_amount):>4}  ({len(neg_amount)/len(recs)*100:.1f}%) — expected ~5%")
-print(f"  Zero amounts      : {len(zero_amount):>4}  ({len(zero_amount)/len(recs)*100:.1f}%) — expected ~5%")
-print(f"  Invalid status    : {len(bad_status):>4}  ({len(bad_status)/len(recs)*100:.1f}%) — expected ~5%")
+    total = len(recs)
+    print(f"\nNoise check on {total} payment records:")
+    print(f"  Negative amounts  : {len(neg_amount):>5} ({len(neg_amount)/total*100:.1f}%) — expected ~5%")
+    print(f"  Zero amounts      : {len(zero_amount):>5} ({len(zero_amount)/total*100:.1f}%) — expected ~5%")
+    print(f"  Invalid status    : {len(bad_status):>5} ({len(bad_status)/total*100:.1f}%) — expected ~5%")
 
-if neg_amount:
-    s = neg_amount[0]
-    print(f"\n  Sample negative: payment_id={s.get('payment_id')}, amount={s.get('amount_aud')}")
-if bad_status:
-    s = bad_status[0]
-    print(f"  Sample bad status: payment_id={s.get('payment_id')}, status='{s.get('status')}'")
+    if neg_amount:
+        s = neg_amount[0]
+        print(f"\n  Sample negative: payment_id={s.get('payment_id')}, amount={s.get('amount_aud')}")
+    if bad_status:
+        s = bad_status[0]
+        print(f"  Sample bad status: payment_id={s.get('payment_id')}, status='{s.get('status')}'")
 
-print("\nNoise check complete — Silver layer will clean these in Day 7.")
+    print("\nNoise check complete — Silver layer will clean these in Day 7.")
 ```
 
 **Expected output:**
