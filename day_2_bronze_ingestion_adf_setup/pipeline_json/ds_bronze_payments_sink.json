@@ -23,7 +23,7 @@
           "type": "Expression"
         },
         "fileName": {
-          "value": "@concat('page_', if(less(dataset().p_page_number, 10), concat('00', string(dataset().p_page_number)), if(less(dataset().p_page_number, 100), concat('0', string(dataset().p_page_number)), string(dataset().p_page_number))), '.json')",
+          "value": "@concat('page_', string(dataset().p_page_number), '.json')",
           "type": "Expression"
         }
       }
