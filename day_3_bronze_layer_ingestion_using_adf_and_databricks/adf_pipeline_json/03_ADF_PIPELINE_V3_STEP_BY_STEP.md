@@ -68,7 +68,10 @@ This linked service connects ADF to your `dev-cluster` (All-Purpose Spark cluste
 > **Why not SQL Warehouse?** ADF's Azure Databricks linked service only works with Spark clusters. SQL Warehouses are for BI tools (Power BI, JDBC). All ADF pipeline activities require a Spark cluster.
 
 1. ADF Studio → **Manage** → **Linked services** → **+ New**
-2. Search `Azure Databricks` → select **Azure Databricks** *(not "Delta Lake")* → **Continue**
+2. In the new linked service dialog → click the **Compute** tab (next to Data Store)
+3. Select **Azure Databricks** → **Continue**
+
+   > **Important:** Do NOT search in the Data Store tab — it only shows "Azure Databricks Delta Lake" which is for Delta table datasets, not cluster/notebook activities. The plain "Azure Databricks" entry is under the **Compute** tab.
 3. Fill in:
    - **Name:** `ls_databricks_cluster`
    - **Account selection method:** From Azure subscription

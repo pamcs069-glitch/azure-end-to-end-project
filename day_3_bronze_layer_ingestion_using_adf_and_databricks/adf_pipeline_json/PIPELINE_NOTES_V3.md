@@ -40,7 +40,8 @@
 ### Step 2 — Create `ls_databricks_cluster` linked service in ADF
 
 1. ADF Studio → **Manage** → **Linked services** → **+ New**
-2. Search `Azure Databricks` → select **Azure Databricks** (not Delta Lake) → **Continue**
+2. Click the **Compute** tab (next to Data Store) → select **Azure Databricks** → **Continue**
+   > The Data Store tab only shows "Azure Databricks Delta Lake" — that is a different connector. Use the **Compute** tab for cluster/notebook linked services.
 3. Fill in:
    - **Name:** `ls_databricks_cluster`
    - **Azure subscription:** select yours
