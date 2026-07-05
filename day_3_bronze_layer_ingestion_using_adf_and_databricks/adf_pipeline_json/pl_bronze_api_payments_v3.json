@@ -1,0 +1,332 @@
+{
+  "name": "pl_bronze_api_payments_v3",
+  "properties": {
+    "description": "Payments API → Bronze. Full load on first run. Incremental reads watermark automatically from dbw_ev_intelligence_dev.default.pipeline_audit. No manual watermark input required. Audit row written after every run (success or failure).",
+    "parameters": {
+      "p_load_type": {
+        "type": "string",
+        "defaultValue": "incremental",
+        "description": "full or incremental"
+      }
+    },
+    "variables": {
+      "v_token":          { "type": "String" },
+      "v_watermark":      { "type": "String" },
+      "v_ingestion_date": { "type": "String" },
+      "v_current_page":   { "type": "Integer", "defaultValue": 1 },
+      "v_temp_page":      { "type": "Integer", "defaultValue": 1 },
+      "v_total_pages":    { "type": "Integer", "defaultValue": 1 },
+      "v_status":         { "type": "String",  "defaultValue": "started" },
+      "v_rows_copied":    { "type": "Integer", "defaultValue": 0 }
+    },
+    "activities": [
+
+      {
+        "name": "act_get_username",
+        "description": "Read VoltGrid username from Key Vault using ADF Managed Identity.",
+        "type": "WebActivity",
+        "dependsOn": [],
+        "typeProperties": {
+          "url": "https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-username/?api-version=7.0",
+          "method": "GET",
+          "authentication": {
+            "type": "MSI",
+            "resource": "https://vault.azure.net"
+          }
+        }
+      },
+
+      {
+        "name": "act_get_password",
+        "description": "Read VoltGrid password from Key Vault using ADF Managed Identity.",
+        "type": "WebActivity",
+        "dependsOn": [
+          { "activity": "act_get_username", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "url": "https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-password/?api-version=7.0",
+          "method": "GET",
+          "authentication": {
+            "type": "MSI",
+            "resource": "https://vault.azure.net"
+          }
+        }
+      },
+
+      {
+        "name": "act_api_login",
+        "description": "POST username+password to VoltGrid login endpoint. Response contains token.",
+        "type": "WebActivity",
+        "dependsOn": [
+          { "activity": "act_get_password", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "url": "https://ev-project-navy-mu.vercel.app/api/auth/login/",
+          "method": "POST",
+          "headers": { "Content-Type": "application/json" },
+          "body": {
+            "value": "@concat('{\"username\":\"', activity('act_get_username').output.value, '\",\"password\":\"', activity('act_get_password').output.value, '\"}')",
+            "type": "Expression"
+          }
+        }
+      },
+
+      {
+        "name": "act_set_token",
+        "type": "SetVariable",
+        "dependsOn": [
+          { "activity": "act_api_login", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "variableName": "v_token",
+          "value": {
+            "value": "@activity('act_api_login').output.token",
+            "type": "Expression"
+          }
+        }
+      },
+
+      {
+        "name": "act_set_ingestion_date",
+        "description": "Capture today's UTC date once — used as the Bronze partition folder name for all pages in this run.",
+        "type": "SetVariable",
+        "dependsOn": [
+          { "activity": "act_set_token", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "variableName": "v_ingestion_date",
+          "value": {
+            "value": "@formatDateTime(utcNow(), 'yyyy-MM-dd')",
+            "type": "Expression"
+          }
+        }
+      },
+
+      {
+        "name": "act_get_watermark",
+        "description": "Runs nb_get_watermark Databricks notebook. For full load: returns '1900-01-01T00:00:00Z'. For incremental: queries dbw_ev_intelligence_dev.default.pipeline_audit for MAX(watermark_value) where pipeline_name='pl_bronze_api_payments_v3' and status='succeeded', returns that value. ADF reads result via activity().output.runOutput.",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          { "activity": "act_set_ingestion_date", "dependencyConditions": ["Succeeded"] }
+        ],
+        "linkedServiceName": {
+          "referenceName": "ls_databricks",
+          "type": "LinkedServiceReference"
+        },
+        "typeProperties": {
+          "notebookPath": "/Shared/ev_intelligence/bronze/nb_get_watermark",
+          "baseParameters": {
+            "pipeline_name": "pl_bronze_api_payments_v3",
+            "load_type": {
+              "value": "@pipeline().parameters.p_load_type",
+              "type": "Expression"
+            }
+          }
+        }
+      },
+
+      {
+        "name": "act_set_watermark",
+        "description": "Store the watermark string returned by nb_get_watermark into v_watermark. All subsequent API calls use this value as updated_after.",
+        "type": "SetVariable",
+        "dependsOn": [
+          { "activity": "act_get_watermark", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "variableName": "v_watermark",
+          "value": {
+            "value": "@activity('act_get_watermark').output.runOutput",
+            "type": "Expression"
+          }
+        }
+      },
+
+      {
+        "name": "act_get_total_pages",
+        "description": "Call page 1 of payments API with the resolved watermark to read pagination.total_pages before starting the loop.",
+        "type": "WebActivity",
+        "dependsOn": [
+          { "activity": "act_set_watermark", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "url": {
+            "value": "@concat('https://ev-project-navy-mu.vercel.app/api/db/payments/?page=1&page_size=100&updated_after=', variables('v_watermark'))",
+            "type": "Expression"
+          },
+          "method": "GET",
+          "headers": {
+            "Authorization": {
+              "value": "@concat('Token ', variables('v_token'))",
+              "type": "Expression"
+            }
+          }
+        }
+      },
+
+      {
+        "name": "act_set_total_pages",
+        "type": "SetVariable",
+        "dependsOn": [
+          { "activity": "act_get_total_pages", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "variableName": "v_total_pages",
+          "value": {
+            "value": "@activity('act_get_total_pages').output.pagination.total_pages",
+            "type": "Expression"
+          }
+        }
+      },
+
+      {
+        "name": "act_paginate",
+        "description": "Loop through all pages. Exits when v_current_page exceeds v_total_pages.",
+        "type": "Until",
+        "dependsOn": [
+          { "activity": "act_set_total_pages", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "expression": {
+            "value": "@greater(variables('v_current_page'), variables('v_total_pages'))",
+            "type": "Expression"
+          },
+          "activities": [
+
+            {
+              "name": "act_copy_payments_page",
+              "type": "Copy",
+              "dependsOn": [],
+              "typeProperties": {
+                "source": {
+                  "type": "RestSource",
+                  "additionalHeaders": {
+                    "Authorization": {
+                      "value": "@concat('Token ', variables('v_token'))",
+                      "type": "Expression"
+                    }
+                  },
+                  "requestMethod": "GET"
+                },
+                "sink": {
+                  "type": "JsonSink",
+                  "storeSettings": { "type": "AzureBlobFSWriteSettings" },
+                  "formatSettings": {
+                    "type": "JsonWriteSettings",
+                    "filePattern": "setOfObjects"
+                  }
+                },
+                "enableStaging": false
+              },
+              "inputs": [
+                {
+                  "referenceName": "ds_voltgrid_payments_src_v3",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "p_page":          { "value": "@variables('v_current_page')", "type": "Expression" },
+                    "p_page_size":     100,
+                    "p_updated_after": { "value": "@variables('v_watermark')",     "type": "Expression" }
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "referenceName": "ds_bronze_payments_sink_v3",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "p_ingestion_date": { "value": "@variables('v_ingestion_date')", "type": "Expression" },
+                    "p_page":           { "value": "@variables('v_current_page')",   "type": "Expression" }
+                  }
+                }
+              ]
+            },
+
+            {
+              "name": "act_set_temp_page",
+              "type": "SetVariable",
+              "dependsOn": [
+                { "activity": "act_copy_payments_page", "dependencyConditions": ["Succeeded"] }
+              ],
+              "typeProperties": {
+                "variableName": "v_temp_page",
+                "value": {
+                  "value": "@add(variables('v_current_page'), 1)",
+                  "type": "Expression"
+                }
+              }
+            },
+
+            {
+              "name": "act_increment_page",
+              "type": "SetVariable",
+              "dependsOn": [
+                { "activity": "act_set_temp_page", "dependencyConditions": ["Succeeded"] }
+              ],
+              "typeProperties": {
+                "variableName": "v_current_page",
+                "value": {
+                  "value": "@variables('v_temp_page')",
+                  "type": "Expression"
+                }
+              }
+            }
+
+          ],
+          "timeout": "0.12:00:00"
+        }
+      },
+
+      {
+        "name": "act_set_status_success",
+        "description": "Mark run as succeeded after the Until loop completes.",
+        "type": "SetVariable",
+        "dependsOn": [
+          { "activity": "act_paginate", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "variableName": "v_status",
+          "value": "succeeded"
+        }
+      },
+
+      {
+        "name": "act_set_status_failed",
+        "description": "Mark run as failed if the Until loop or any upstream activity fails.",
+        "type": "SetVariable",
+        "dependsOn": [
+          { "activity": "act_paginate", "dependencyConditions": ["Failed"] }
+        ],
+        "typeProperties": {
+          "variableName": "v_status",
+          "value": "failed"
+        }
+      },
+
+      {
+        "name": "act_write_audit",
+        "description": "Always runs — success or failure. Calls nb_write_audit which appends one row to dbw_ev_intelligence_dev.default.pipeline_audit. Stores: pipeline_name, load_type, watermark_value (= v_watermark used this run), ingestion_date, total_pages, status, pipeline_run_id, run_timestamp. Next incremental run will read MAX(watermark_value) from this table.",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          { "activity": "act_set_status_success", "dependencyConditions": ["Succeeded"] },
+          { "activity": "act_set_status_failed",  "dependencyConditions": ["Succeeded"] }
+        ],
+        "linkedServiceName": {
+          "referenceName": "ls_databricks",
+          "type": "LinkedServiceReference"
+        },
+        "typeProperties": {
+          "notebookPath": "/Shared/ev_intelligence/bronze/nb_write_audit",
+          "baseParameters": {
+            "pipeline_name":   "pl_bronze_api_payments_v3",
+            "load_type":       { "value": "@pipeline().parameters.p_load_type",    "type": "Expression" },
+            "watermark_value": { "value": "@variables('v_watermark')",              "type": "Expression" },
+            "ingestion_date":  { "value": "@variables('v_ingestion_date')",         "type": "Expression" },
+            "total_pages":     { "value": "@string(variables('v_total_pages'))",    "type": "Expression" },
+            "status":          { "value": "@variables('v_status')",                 "type": "Expression" },
+            "pipeline_run_id": { "value": "@pipeline().RunId",                      "type": "Expression" }
+          }
+        }
+      }
+
+    ]
+  }
+}
