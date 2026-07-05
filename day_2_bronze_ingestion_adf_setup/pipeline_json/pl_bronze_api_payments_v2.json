@@ -149,7 +149,7 @@
         ],
         "typeProperties": {
           "url": {
-            "value": "@concat('https://ev-project-navy-mu.vercel.app/api/db/payments/?page=1&page_size=100', if(equals(variables('v_watermark'), '1900-01-01T00:00:00Z'), '', concat('&updated_after=', variables('v_watermark'))))",
+            "value": "@concat('https://ev-project-navy-mu.vercel.app/api/db/payments/?page=1&page_size=100&updated_after=', variables('v_watermark'))",
             "type": "Expression"
           },
           "method": "GET",
