@@ -103,7 +103,7 @@
 
       {
         "name": "act_get_watermark",
-        "description": "Lookup Activity — queries pipeline_audit Delta table via Databricks SQL Warehouse. For full load returns the epoch date constant. For incremental returns MAX(watermark_value) from last succeeded run. Result accessed via activity('act_get_watermark').output.firstRow.last_watermark.",
+        "description": "Lookup Activity — queries pipeline_audit Delta table via ls_databricks_cluster (dev-cluster, All-Purpose Spark cluster). For full load returns the epoch date constant. For incremental returns MAX(watermark_value) from last succeeded run. Result accessed via activity('act_get_watermark').output.firstRow.last_watermark.",
         "type": "Lookup",
         "dependsOn": [
           { "activity": "act_set_ingestion_date", "dependencyConditions": ["Succeeded"] }
