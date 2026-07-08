@@ -1,0 +1,18 @@
+{
+  "name": "ds_bronze_payments_sink",
+  "properties": {
+    "linkedServiceName": {
+      "referenceName": "ls_adls_bronze",
+      "type": "LinkedServiceReference"
+    },
+    "type": "Json",
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "fileSystem": "bronze",
+        "folderPath": "api/payments/raw",
+        "fileName": "payments.json"
+      }
+    }
+  }
+}

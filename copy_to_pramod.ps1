@@ -2,7 +2,7 @@ Clear-Host
 
 Write-Host ""
 Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "      Azure Data Engineering Course Sync Utility"
+Write-Host "      Azure Data Engineering Course Sync Utility" -ForegroundColor Cyan
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -17,6 +17,11 @@ $ignoreFolders = @(
     "pramod"
 )
 
+# Create pramod folder if missing
+if (!(Test-Path ".\pramod")) {
+    New-Item -Path ".\pramod" -ItemType Directory | Out-Null
+}
+
 Get-ChildItem -Directory | Where-Object {
     $_.Name -like "day_*"
 } | ForEach-Object {
@@ -24,9 +29,10 @@ Get-ChildItem -Directory | Where-Object {
     $sourceFolder = $_.FullName
     $targetFolder = Join-Path ".\pramod" $_.Name
 
+    # Create day folder if it doesn't exist
     if (!(Test-Path $targetFolder)) {
 
-        New-Item -ItemType Directory -Path $targetFolder -Force | Out-Null
+        New-Item -Path $targetFolder -ItemType Directory -Force | Out-Null
 
         Write-Host ""
         Write-Host "Created folder: $($_.Name)" -ForegroundColor Green
@@ -34,31 +40,38 @@ Get-ChildItem -Directory | Where-Object {
         $createdFolders++
     }
 
-    Get-ChildItem $sourceFolder -Recurse | ForEach-Object {
+    # Copy all files recursively
+    Get-ChildItem -Path $sourceFolder -Recurse -File | ForEach-Object {
 
-        if ($_.PSIsContainer) {
-            return
-        }
+        # Skip ignored folders
+        $skip = $false
 
         foreach ($ignore in $ignoreFolders) {
-            if ($_.FullName -like "*\$ignore\*") {
-                return
+            if ($_.FullName -match "\\$ignore\\") {
+                $skip = $true
+                break
             }
+        }
+
+        if ($skip) {
+            return
         }
 
         $relativePath = $_.FullName.Substring($sourceFolder.Length).TrimStart('\')
 
         $destination = Join-Path $targetFolder $relativePath
 
-        $destinationFolder = Split-Path $destination
+        $destinationFolder = Split-Path -Parent $destination
 
+        # Create nested folders if needed
         if (!(Test-Path $destinationFolder)) {
-            New-Item -ItemType Directory -ItemType Directory -Force -Path $destinationFolder | Out-Null
+            New-Item -Path $destinationFolder -ItemType Directory -Force | Out-Null
         }
 
+        # Copy only if file doesn't exist
         if (!(Test-Path $destination)) {
 
-            Copy-Item $_.FullName $destination
+            Copy-Item -Path $_.FullName -Destination $destination
 
             Write-Host "  + $relativePath" -ForegroundColor Green
 
@@ -67,11 +80,8 @@ Get-ChildItem -Directory | Where-Object {
         else {
 
             $skippedFiles++
-
         }
-
     }
-
 }
 
 Write-Host ""
