@@ -1,0 +1,146 @@
+{
+  "name": "pl_bronze_api_payments",
+  "properties": {
+    "parameters": {
+      "p_page": {
+        "type": "int",
+        "defaultValue": 1
+      },
+      "p_page_size": {
+        "type": "int",
+        "defaultValue": 100
+      }
+    },
+    "variables": {
+      "v_token": {
+        "type": "String"
+      }
+    },
+    "activities": [
+      {
+        "name": "act_get_username",
+        "type": "WebActivity",
+        "dependsOn": [],
+        "typeProperties": {
+          "url": "https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-username/?api-version=7.0",
+          "method": "GET",
+          "authentication": {
+            "type": "MSI",
+            "resource": "https://vault.azure.net"
+          }
+        }
+      },
+      {
+        "name": "act_get_password",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "act_get_username",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "url": "https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-password/?api-version=7.0",
+          "method": "GET",
+          "authentication": {
+            "type": "MSI",
+            "resource": "https://vault.azure.net"
+          }
+        }
+      },
+      {
+        "name": "act_api_login",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "act_get_password",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "url": "https://ev-project-navy-mu.vercel.app/api/auth/login/",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "value": "@concat('{\"username\":\"', activity('act_get_username').output.value, '\",\"password\":\"', activity('act_get_password').output.value, '\"}')",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "act_set_token",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "act_api_login",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "v_token",
+          "value": {
+            "value": "@activity('act_api_login').output.token",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "act_copy_payments",
+        "type": "Copy",
+        "dependsOn": [
+          {
+            "activity": "act_set_token",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "RestSource",
+            "additionalHeaders": {
+              "Authorization": {
+                "value": "@concat('Token ', variables('v_token'))",
+                "type": "Expression"
+              }
+            },
+            "requestMethod": "GET"
+          },
+          "sink": {
+            "type": "JsonSink",
+            "storeSettings": {
+              "type": "AzureBlobFSWriteSettings"
+            },
+            "formatSettings": {
+              "type": "JsonWriteSettings",
+              "filePattern": "setOfObjects"
+            }
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_voltgrid_payments_src",
+            "type": "DatasetReference",
+            "parameters": {
+              "p_page": {
+                "value": "@pipeline().parameters.p_page",
+                "type": "Expression"
+              },
+              "p_page_size": {
+                "value": "@pipeline().parameters.p_page_size",
+                "type": "Expression"
+              }
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_bronze_payments_sink",
+            "type": "DatasetReference"
+          }
+        ]
+      }
+    ]
+  }
+}

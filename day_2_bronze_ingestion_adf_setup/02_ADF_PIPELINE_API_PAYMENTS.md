@@ -1,408 +1,419 @@
-# 02 — ADF Pipeline: API Payments → Bronze Delta
-**Day 2 | Step 2 of 4**
+# 02 — ADF Pipeline: API Payments → Bronze
+**Day 2 | Step 2 of 3**
 
-Build an ADF pipeline that:
-1. Logs in to VoltGrid API → gets a token
-2. On first run: loads ALL payments pages (full load)
-3. On subsequent runs: loads only pages where `updated_at > last_watermark` (incremental)
-4. Writes every page to `bronze/api/payments/` as a Delta table in ADLS Gen2
-5. Writes the new high-watermark to `pipeline_audit` after a successful run
+Build the `pl_bronze_api_payments` pipeline — authenticates to VoltGrid API using credentials from Key Vault, then copies one page of raw payment records as JSON into ADLS Gen2 Bronze layer.
+
+> **Scope note:** This pipeline covers the VoltGrid REST API only. The source blob storage (`dataenggdailystorage`) is accessed from Databricks notebooks — not ADF. Blob ingestion is covered in Day 3.
 
 ---
 
 ## Pipeline Overview
 
-```
-pl_bronze_api_payments
-│
-├── Step 1: Web Activity (×3)    Fetch base URL, username, password from Key Vault
-│
-├── Step 2: Web Activity         POST /api/auth/login/ → get token
-│
-├── Step 3: Set Variable         Store token in pipeline variable v_token
-│
-├── Step 4: Set Variable         Set watermark = "1900-01-01T00:00:00Z" (full) or last run value
-│
-├── Step 5: Until Activity       Loop while v_current_page <= v_total_pages
-│   └── Step 5a: Copy Activity   GET /api/db/payments/?updated_after={wm}&page={n}
-│                                → append each page to Bronze Delta table
-│   └── Step 5b: Set Variable    Increment v_current_page by 1
-│
-└── Step 6: Notebook Activity    Write new watermark to pipeline_audit table
-```
-
----
-
-## API Behaviour
-
-```
-GET /api/db/payments/?updated_after=2026-01-01T00:00:00Z&page=1&page_size=100
-
-Response:
-{
-  "data": [ { ...payment... }, ... ],
-  "pagination": {
-    "page": 1,
-    "page_size": 100,
-    "total": 12500,
-    "total_pages": 125
-  }
-}
-```
-
-- Records are under `"data"` — NOT `"results"`. This is a common mistake with other frameworks.
-- `updated_after` — ISO 8601 timestamp. Returns only rows where `updated_at > value`. Omit entirely on first run to get all rows.
-- `page_size` max is 100.
-- Loop pages 1 → `total_pages` to get everything.
+| Property | Value |
+|---|---|
+| Pipeline name | `pl_bronze_api_payments` |
+| Source | VoltGrid REST API — `GET /api/db/payments/` |
+| Sink | ADLS Gen2 Bronze — `bronze/api/payments/raw/payments.json` |
+| Auth pattern | Key Vault → login → runtime token → Copy Activity header |
+| Activities | 5 (get_username → get_password → api_login → set_token → copy_payments) |
+| Parameters | `p_page` (default 1), `p_page_size` (default 100) |
+| Day 2 goal | Prove connectivity: Key Vault → API → ADLS. One page only. |
+| Pagination | Not in Day 2. Full pagination + incremental load → Day 3. |
 
 ---
 
 ## Part A — Create Datasets
 
-### Dataset 1: VoltGrid Payments REST Source (`ds_voltgrid_payments_src`)
+Datasets are pointers to the source and sink locations. Create both datasets before building the pipeline — the pipeline JSON references them by name.
 
-**UI Steps:**
+---
 
-1. ADF Studio → **Author** (pencil icon) → **Datasets** → **+ New dataset**
-2. Search `REST` → **REST** → **Continue**
+### Dataset 1 — Source: VoltGrid Payments API (`ds_voltgrid_payments_src`)
+
+**What it is:** Points to `GET /api/db/payments/` on the VoltGrid API. The page and page size are parameters — the pipeline passes them at runtime.
+
+**Why parameters instead of hardcoded values?**
+You can trigger the pipeline with different page numbers (e.g. page 2 for a quick test) without changing the dataset definition.
+
+#### UI Steps
+
+1. ADF Studio → **Author** (pencil icon) → **Datasets** → **+** → **New dataset**
+2. Search `REST` → select **REST** → **Continue**
 3. Fill in:
    - **Name:** `ds_voltgrid_payments_src`
    - **Linked service:** `ls_voltgrid_api`
    - **Relative URL:** `/api/db/payments/`
 4. Click **OK**
-5. Go to **Parameters** tab → **+ New** — add these 3 parameters:
-   - `p_page` | Type: Int | Default: 1
-   - `p_page_size` | Type: Int | Default: 100
-   - `p_updated_after` | Type: String | Default: (leave empty)
-6. Go to **Connection** tab → **Relative URL** field → click **Add dynamic content** and paste:
+5. In the dataset editor → **Parameters** tab → add:
+   - `p_page` — type: `int` — default: `1`
+   - `p_page_size` — type: `int` — default: `100`
+6. In the **Connection** tab → **Relative URL** field → click **Add dynamic content**:
    ```
-   /api/db/payments/?page=@{dataset().p_page}&page_size=@{dataset().p_page_size}@{if(empty(dataset().p_updated_after),'',concat('&updated_after=',dataset().p_updated_after))}
+   /api/db/payments/?page=@{dataset().p_page}&page_size=@{dataset().p_page_size}
    ```
-   > The `if(empty(...))` expression: on first run (watermark = empty string or "1900-..."), omit `updated_after` entirely → gets all rows. On subsequent runs, append the filter.
-
 7. Click **Publish all**
 
----
+#### JSON (paste via `{ }` Code button)
 
-### Dataset 2: Bronze Payments Delta Sink (`ds_bronze_payments_delta`)
+File: `adf_pipeline_json/ds_voltgrid_payments_src.json`
 
-**UI Steps:**
-
-1. **Datasets** → **+ New dataset**
-2. Search `Azure Data Lake Storage Gen2` → **Continue**
-3. Search `Delta` → **Delta** → **Continue**
-4. Fill in:
-   - **Name:** `ds_bronze_payments_delta`
-   - **Linked service:** `ls_adls_bronze`
-   - **File path (Container):** `bronze`
-   - **File path (Directory):** `api/payments`
-5. Click **OK**
-6. Click **Publish all**
-
----
-
-## Part B — Create Pipeline `pl_bronze_api_payments`
-
-**UI Steps:**
-
-1. **Author** → **Pipelines** → **+ New pipeline**
-2. **Name:** `pl_bronze_api_payments`
-3. Go to **Parameters** tab → **+ New**:
-   - `p_load_type` | Type: String | Default: `incremental`
-4. Go to **Variables** tab → **+ New** — add these 4 variables:
-   - `v_token` | Type: String
-   - `v_watermark` | Type: String
-   - `v_current_page` | Type: Integer | Default: 1
-   - `v_total_pages` | Type: Integer | Default: 1
-
----
-
-### Step 1 — Three Web Activities: Fetch secrets from Key Vault
-
-ADF reads secrets at runtime using its Managed Identity. Add one Web Activity per secret.
-
-**Web Activity 1: `act_get_base_url`**
-- **URL:** `https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-api-base-url/?api-version=7.0`
-- **Method:** GET
-- **Authentication:** Managed Identity
-- **Resource:** `https://vault.azure.net`
-- Output used as: `@{activity('act_get_base_url').output.value}`
-
-**Web Activity 2: `act_get_username`**
-- **URL:** `https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-username/?api-version=7.0`
-- **Method:** GET
-- **Authentication:** Managed Identity
-- **Resource:** `https://vault.azure.net`
-
-**Web Activity 3: `act_get_password`**
-- **URL:** `https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-password/?api-version=7.0`
-- **Method:** GET
-- **Authentication:** Managed Identity
-- **Resource:** `https://vault.azure.net`
-
-Connect all 3 in sequence (1 → 2 → 3), or run 2 and 3 in parallel after 1.
-
----
-
-### Step 2 — Web Activity: Login and get token
-
-1. Add a 4th **Web** activity after the secret-fetch activities
-2. **Name:** `act_api_login`
-3. **Settings** tab:
-   - **URL** (dynamic content):
-     ```
-     @{concat(activity('act_get_base_url').output.value, '/api/auth/login/')}
-     ```
-   - **Method:** POST
-   - **Headers:** add one header:
-     - Name: `Content-Type`
-     - Value: `application/json`
-   - **Body** (dynamic content):
-     ```
-     @{concat('{"username":"', activity('act_get_username').output.value, '","password":"', activity('act_get_password').output.value, '"}')}
-     ```
-4. Output of this activity: `@{activity('act_api_login').output.token}`
-
----
-
-### Step 3 — Set Variable: Store token
-
-1. Add **Set Variable** activity after `act_api_login`
-2. **Name:** `act_set_token`
-3. **Variable:** `v_token`
-4. **Value** (dynamic content): `@{activity('act_api_login').output.token}`
-
----
-
-### Step 4 — Set Variable: Set watermark
-
-For Day 2, use a fixed watermark value. In Day 8 (ADF Orchestration) you will wire this to read from the real `pipeline_audit` table.
-
-1. Add **Set Variable** activity after `act_set_token`
-2. **Name:** `act_set_watermark`
-3. **Variable:** `v_watermark`
-4. **Value:** `1900-01-01T00:00:00Z`
-
-> Setting to `1900-01-01T00:00:00Z` means every run fetches all records (full load). To simulate an incremental run: change this value to any recent date, re-run the pipeline, and you will see far fewer records copied.
-
----
-
-### Step 5 — Until Activity: Paginate all pages
-
-1. Add **Until** activity after `act_set_watermark`
-2. **Name:** `act_paginate`
-3. **Expression** (stop condition — loop stops when this is True):
-   ```
-   @greater(variables('v_current_page'), variables('v_total_pages'))
-   ```
-
-**Inside the Until, add two activities:**
-
-#### 5a — Copy Activity: `act_copy_payments_page`
-
-**Source tab:**
-- Dataset: `ds_voltgrid_payments_src`
-- Dataset parameters:
-  - `p_page`: `@{variables('v_current_page')}`
-  - `p_page_size`: `100`
-  - `p_updated_after`: `@{variables('v_watermark')}`
-- **Additional headers:**
-  ```
-  Authorization: Token @{variables('v_token')}
-  ```
-- **Pagination rules** → **+ New rule:**
-  - Absolute URL: leave empty
-  - Query parameter for next page: leave empty
-  - Support RFC 5988: No
-  - **JSON path expressions → Add rule:**
-    - Name: anything (e.g. `totalPages`)
-    - Value: `$.pagination.total_pages`
-    - Variable: `v_total_pages`
-
-> This pagination rule reads `total_pages` from the first response and stores it in `v_total_pages`. The Until loop uses that to know when to stop.
-
-**Sink tab:**
-- Dataset: `ds_bronze_payments_delta`
-- **Write behavior:** Append
-- **Pre-copy script:** (leave empty)
-
-**Mapping tab → Collection reference:**
-
-Click **Import schemas** — if it fails due to auth, set manually:
-- **Collection reference:** `$.data`
-
-Then add the column mappings:
-
-| Source path (from `data[]`) | Destination column | Type |
-|---|---|---|
-| payment_id | payment_id | String |
-| session_id | session_id | String |
-| customer_id | customer_id | String |
-| gateway | gateway | String |
-| amount_aud | amount_aud | Double |
-| gst | gst | Double |
-| payment_mode | payment_mode | String |
-| status | status | String |
-| processed_at | processed_at | String |
-| created_at | created_at | String |
-| updated_at | updated_at | String |
-
-#### 5b — Set Variable: Increment page
-
-1. Add **Set Variable** activity after `act_copy_payments_page` inside the Until
-2. **Name:** `act_increment_page`
-3. **Variable:** `v_current_page`
-4. **Value** (dynamic content): `@{add(variables('v_current_page'), 1)}`
-
-Connect: `act_copy_payments_page` → `act_increment_page` (on Success)
-
----
-
-### Step 6 — Notebook Activity: Write watermark (optional for Day 2)
-
-> This step is optional for Day 2. The watermark is written by the Databricks notebook (`03_bronze_api_payments.ipynb`) directly. You can skip the ADF Notebook Activity for now and run the Databricks notebook manually after the pipeline.
-
-If you want ADF to trigger it automatically:
-
-1. Add **Notebook** activity after the Until
-2. **Name:** `act_write_audit`
-3. **Azure Databricks** tab:
-   - Linked service: `ls_databricks` (create this — see Part C below)
-   - Notebook path: `/Shared/ev-project/03_bronze_api_payments`
-4. **Base parameters:**
-   - `pipeline_run_id`: `@{pipeline().RunId}`
-   - `load_type`: `@{pipeline().parameters.p_load_type}`
-
----
-
-## Part C — Create Databricks Linked Service `ls_databricks` (optional)
-
-Only needed if you want Step 6 (Notebook Activity) in the pipeline.
-
-### UI Steps
-
-1. Manage → Linked services → **+ New**
-2. Search `Azure Databricks` → **Continue**
-3. Fill in:
-   - **Name:** `ls_databricks`
-   - **Azure subscription:** yours
-   - **Databricks workspace:** `dbw-ev-intelligence-dev`
-   - **Select cluster:** Existing interactive cluster → select `dev-cluster`
-   - **Access token:** use Key Vault reference or enter a Personal Access Token
-
-> To create a Databricks PAT: Databricks UI → top-right user menu → **Settings** → **Developer** → **Access tokens** → **Generate new token**.
-> Store it as `databricks-pat` in Key Vault.
-
-### CLI Steps
-
-**Step 1 — Get Databricks workspace URL (CMD / PowerShell):**
-```cmd
-az databricks workspace show --resource-group rg-ev-intelligence-dev --name dbw-ev-intelligence-dev --query "workspaceUrl" -o tsv
-```
-Copy the output (e.g. `adb-1234567890.12.azuredatabricks.net`).
-
-**Step 2 — Get Databricks workspace resource ID (CMD / PowerShell):**
-```cmd
-az databricks workspace show --resource-group rg-ev-intelligence-dev --name dbw-ev-intelligence-dev --query "id" -o tsv
-```
-Copy the output.
-
-**Step 3 — Store PAT in Key Vault (CMD / PowerShell — replace `<PAT>` with your token):**
-```cmd
-az keyvault secret set --vault-name kv-ev-intelligence-dev --name "databricks-pat" --value "<PAT>"
-```
-
-**Step 4 — Create the linked service (CMD / PowerShell — replace `<workspace-url>` and `<workspace-resource-id>`):**
-```cmd
-az datafactory linked-service create --resource-group rg-ev-intelligence-dev --factory-name adf-ev-intelligence-dev --linked-service-name "ls_databricks" --properties "{\"type\": \"AzureDatabricks\", \"typeProperties\": {\"domain\": \"https://<workspace-url>\", \"accessToken\": {\"type\": \"AzureKeyVaultSecret\", \"store\": {\"referenceName\": \"ls_keyvault\", \"type\": \"LinkedServiceReference\"}, \"secretName\": \"databricks-pat\"}, \"existingClusterId\": \"<cluster-id>\"}}"
-```
-
-**Multi-line (bash / Git Bash only):**
-```bash
-az datafactory linked-service create \
-  --resource-group rg-ev-intelligence-dev \
-  --factory-name adf-ev-intelligence-dev \
-  --linked-service-name "ls_databricks" \
-  --properties '{
-    "type": "AzureDatabricks",
+```json
+{
+  "name": "ds_voltgrid_payments_src",
+  "properties": {
+    "linkedServiceName": {
+      "referenceName": "ls_voltgrid_api",
+      "type": "LinkedServiceReference"
+    },
+    "parameters": {
+      "p_page":      { "type": "int", "defaultValue": 1 },
+      "p_page_size": { "type": "int", "defaultValue": 100 }
+    },
+    "type": "RestResource",
     "typeProperties": {
-      "domain": "https://<workspace-url>",
-      "accessToken": {
-        "type": "AzureKeyVaultSecret",
-        "store": {
-          "referenceName": "ls_keyvault",
-          "type": "LinkedServiceReference"
-        },
-        "secretName": "databricks-pat"
-      },
-      "existingClusterId": "<cluster-id>"
+      "relativeUrl": {
+        "value": "@concat('/api/db/payments/?page=', string(dataset().p_page), '&page_size=', string(dataset().p_page_size))",
+        "type": "Expression"
+      }
     }
-  }'
+  }
+}
 ```
 
-> To find `cluster-id`: Databricks UI → **Compute** → click `dev-cluster` → look in the URL: `https://adb-xxx.azuredatabricks.net/#setting/clusters/<cluster-id>/configuration`
+> In ADF Studio: Author → Datasets → `+` → Code button (`{ }`) → select all → paste → OK → Publish all
 
 ---
 
-## Part D — Trigger the Pipeline
+### Dataset 2 — Sink: ADLS Gen2 Bronze (`ds_bronze_payments_sink`)
 
-### Manual trigger — UI
+**What it is:** Points to a fixed file path in the `bronze` container. Day 2 always writes to the same file — no date partitioning yet. That is added in Day 3.
 
-1. Open `pl_bronze_api_payments` in ADF Studio
+#### UI Steps
+
+1. ADF Studio → **Author** → **Datasets** → **+** → **New dataset**
+2. Search `Azure Data Lake Storage Gen2` → **Continue**
+3. Select **JSON** as format → **Continue**
+4. Fill in:
+   - **Name:** `ds_bronze_payments_sink`
+   - **Linked service:** `ls_adls_bronze`
+   - **File path:** `bronze` / `api/payments/raw` / `payments.json`
+5. Click **OK** → **Publish all**
+
+#### JSON (paste via `{ }` Code button)
+
+File: `adf_pipeline_json/ds_bronze_payments_sink.json`
+
+```json
+{
+  "name": "ds_bronze_payments_sink",
+  "properties": {
+    "linkedServiceName": {
+      "referenceName": "ls_adls_bronze",
+      "type": "LinkedServiceReference"
+    },
+    "type": "Json",
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "fileSystem": "bronze",
+        "folderPath": "api/payments/raw",
+        "fileName": "payments.json"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Part B — Build the Pipeline
+
+**Pipeline name:** `pl_bronze_api_payments`
+**Activities (in order):**
+
+| # | Activity | Type | What it does |
+|---|---|---|---|
+| 1 | `act_get_username` | Web Activity | Reads `voltgrid-username` from Key Vault via ADF Managed Identity |
+| 2 | `act_get_password` | Web Activity | Reads `voltgrid-password` from Key Vault via ADF Managed Identity |
+| 3 | `act_api_login` | Web Activity | POST to `/api/auth/login/` — gets a bearer token |
+| 4 | `act_set_token` | Set Variable | Stores the token in `v_token` for the Copy Activity |
+| 5 | `act_copy_payments` | Copy Activity | Calls `GET /api/db/payments/?page={p_page}&page_size={p_page_size}` with token → writes raw JSON to Bronze |
+
+---
+
+### Step 1 — Create the Pipeline
+
+1. ADF Studio → **Author** → **Pipelines** → **+** → **New pipeline**
+2. **Name:** `pl_bronze_api_payments`
+3. In the **Parameters** tab (bottom panel) → add:
+   - `p_page` — type: `int` — default: `1`
+   - `p_page_size` — type: `int` — default: `100`
+4. In the **Variables** tab → add:
+   - `v_token` — type: `String`
+
+---
+
+### Step 2 — Activity 1: `act_get_username`
+
+**Type:** Web Activity
+
+1. Drag **Web Activity** from the Activities pane onto the canvas
+2. **Name:** `act_get_username`
+3. **Settings** tab:
+   - **URL:** `https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-username/?api-version=7.0`
+   - **Method:** GET
+   - **Authentication:** System Assigned Managed Identity
+   - **Resource:** `https://vault.azure.net`
+
+---
+
+### Step 3 — Activity 2: `act_get_password`
+
+**Type:** Web Activity
+
+1. Drag another **Web Activity** onto the canvas
+2. **Name:** `act_get_password`
+3. Draw a success arrow from `act_get_username` → `act_get_password`
+4. **Settings:**
+   - **URL:** `https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-password/?api-version=7.0`
+   - **Method:** GET
+   - **Authentication:** System Assigned Managed Identity
+   - **Resource:** `https://vault.azure.net`
+
+---
+
+### Step 4 — Activity 3: `act_api_login`
+
+**Type:** Web Activity
+
+1. Drag another **Web Activity** → name it `act_api_login`
+2. Connect success arrow from `act_get_password` → `act_api_login`
+3. **Settings:**
+   - **URL:** `https://ev-project-navy-mu.vercel.app/api/auth/login/`
+   - **Method:** POST
+   - **Headers:** `Content-Type` = `application/json`
+   - **Body:** click **Add dynamic content**:
+     ```
+     @concat('{"username":"', activity('act_get_username').output.value, '","password":"', activity('act_get_password').output.value, '"}')
+     ```
+
+**What this returns:**
+```json
+{ "token": "abc123xyz..." }
+```
+
+---
+
+### Step 5 — Activity 4: `act_set_token`
+
+**Type:** Set Variable
+
+1. Drag **Set Variable** → name it `act_set_token`
+2. Connect success arrow from `act_api_login` → `act_set_token`
+3. **Settings:**
+   - **Variable:** `v_token`
+   - **Value:** click **Add dynamic content**:
+     ```
+     @activity('act_api_login').output.token
+     ```
+
+---
+
+### Step 6 — Activity 5: `act_copy_payments`
+
+**Type:** Copy Activity — this is the main data movement step.
+
+1. Drag **Copy data** → name it `act_copy_payments`
+2. Connect success arrow from `act_set_token` → `act_copy_payments`
+
+#### Source tab:
+- **Source dataset:** `ds_voltgrid_payments_src`
+- **Dataset parameters:**
+  - `p_page` → `@pipeline().parameters.p_page`
+  - `p_page_size` → `@pipeline().parameters.p_page_size`
+- **Additional headers:**
+  - **Name:** `Authorization`
+  - **Value:** click **Add dynamic content** → `@concat('Token ', variables('v_token'))`
+- **Request method:** GET
+
+#### Sink tab:
+- **Sink dataset:** `ds_bronze_payments_sink`
+- **File pattern:** setOfObjects
+
+#### Settings tab:
+- Leave defaults — no staging needed
+
+---
+
+### Full Pipeline JSON (paste via `{ }` Code button)
+
+File: `adf_pipeline_json/pl_bronze_api_payments.json`
+
+> ADF Studio: Author → Pipelines → `pl_bronze_api_payments` → `{ }` Code button → select all → paste → OK → Publish all
+
+```json
+{
+  "name": "pl_bronze_api_payments",
+  "properties": {
+    "description": "Day 2 — simple payments pipeline. Reads one page of VoltGrid API and stores raw JSON in Bronze. Authentication via Key Vault MSI. Pagination and incremental load added in Day 3.",
+    "parameters": {
+      "p_page":      { "type": "int", "defaultValue": 1 },
+      "p_page_size": { "type": "int", "defaultValue": 100 }
+    },
+    "variables": {
+      "v_token": { "type": "String" }
+    },
+    "activities": [
+      {
+        "name": "act_get_username",
+        "type": "WebActivity",
+        "dependsOn": [],
+        "typeProperties": {
+          "url": "https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-username/?api-version=7.0",
+          "method": "GET",
+          "authentication": {
+            "type": "MSI",
+            "resource": "https://vault.azure.net"
+          }
+        }
+      },
+      {
+        "name": "act_get_password",
+        "type": "WebActivity",
+        "dependsOn": [
+          { "activity": "act_get_username", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "url": "https://kv-ev-intelligence-dev.vault.azure.net/secrets/voltgrid-password/?api-version=7.0",
+          "method": "GET",
+          "authentication": {
+            "type": "MSI",
+            "resource": "https://vault.azure.net"
+          }
+        }
+      },
+      {
+        "name": "act_api_login",
+        "type": "WebActivity",
+        "dependsOn": [
+          { "activity": "act_get_password", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "url": "https://ev-project-navy-mu.vercel.app/api/auth/login/",
+          "method": "POST",
+          "headers": { "Content-Type": "application/json" },
+          "body": {
+            "value": "@concat('{\"username\":\"', activity('act_get_username').output.value, '\",\"password\":\"', activity('act_get_password').output.value, '\"}')",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "act_set_token",
+        "type": "SetVariable",
+        "dependsOn": [
+          { "activity": "act_api_login", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "variableName": "v_token",
+          "value": {
+            "value": "@activity('act_api_login').output.token",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "act_copy_payments",
+        "type": "Copy",
+        "dependsOn": [
+          { "activity": "act_set_token", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "RestSource",
+            "additionalHeaders": {
+              "Authorization": {
+                "value": "@concat('Token ', variables('v_token'))",
+                "type": "Expression"
+              }
+            },
+            "requestMethod": "GET"
+          },
+          "sink": {
+            "type": "JsonSink",
+            "storeSettings": { "type": "AzureBlobFSWriteSettings" },
+            "formatSettings": {
+              "type": "JsonWriteSettings",
+              "filePattern": "setOfObjects"
+            }
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_voltgrid_payments_src",
+            "type": "DatasetReference",
+            "parameters": {
+              "p_page":      { "value": "@pipeline().parameters.p_page",      "type": "Expression" },
+              "p_page_size": { "value": "@pipeline().parameters.p_page_size", "type": "Expression" }
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_bronze_payments_sink",
+            "type": "DatasetReference"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+---
+
+## Part C — Trigger the Pipeline
+
+### Manual trigger (Day 2 test)
+
+1. ADF Studio → **Author** → `pl_bronze_api_payments`
 2. Click **Add trigger** → **Trigger now**
-3. `p_load_type`: `full`
+3. Enter parameters:
+   - `p_page`: `1`
+   - `p_page_size`: `100`
 4. Click **OK**
-5. Go to **Monitor** tab → watch the pipeline run → all activities should show green
+5. Left sidebar → **Monitor** → watch the pipeline run
 
-### Scheduled trigger — UI
-
-1. **Add trigger** → **New/Edit**
-2. **Name:** `tr_bronze_api_payments_daily`
-3. **Type:** Schedule
-4. **Recurrence:** every day at `02:00 UTC`
-5. **Parameters:** `p_load_type` = `incremental`
-6. Click **OK** → **Publish all**
-
-### Manual trigger — CLI
-
-> **CMD / PowerShell users:** Use the single-line version.
-
-**Single line (CMD / PowerShell):**
-```cmd
-az datafactory pipeline create-run --resource-group rg-ev-intelligence-dev --factory-name adf-ev-intelligence-dev --pipeline-name "pl_bronze_api_payments" --parameters "{\"p_load_type\": \"full\"}"
-```
-
-**Multi-line (bash / Git Bash only):**
-```bash
-az datafactory pipeline create-run \
-  --resource-group rg-ev-intelligence-dev \
-  --factory-name adf-ev-intelligence-dev \
-  --pipeline-name "pl_bronze_api_payments" \
-  --parameters '{"p_load_type": "full"}'
-```
-
-**Check run status (CMD / PowerShell):**
-```cmd
-az datafactory pipeline-run query-by-factory --resource-group rg-ev-intelligence-dev --factory-name adf-ev-intelligence-dev --last-updated-after "2026-01-01T00:00:00Z" --last-updated-before "2027-01-01T00:00:00Z" --query "value[0].{Status:status, RunId:runId, Message:message}" -o table
-```
+**Expected result:** All 5 activities show green checkmarks. Run time ~10–20 seconds.
 
 ---
 
-## Verify in ADLS (Databricks)
+## Verify the Output
 
-After the pipeline runs, check Bronze Delta files exist:
+### In ADF Monitor
+
+1. **Monitor** → **Pipeline runs** → click the run
+2. Confirm all 5 activities succeeded
+3. Click `act_copy_payments` → **Output** → rows read and written should match
+
+### In Databricks
+
+Run in a Databricks notebook after the pipeline completes:
 
 ```python
-display(dbutils.fs.ls(abfss("bronze", "api/payments/")))
+# List the output
+display(dbutils.fs.ls("abfss://bronze@evdatalakedev.dfs.core.windows.net/api/payments/raw/"))
+
+# Read the raw JSON
+df = spark.read.option("multiLine", "true").json(
+    "abfss://bronze@evdatalakedev.dfs.core.windows.net/api/payments/raw/payments.json"
+)
+display(df.limit(3))
+print(f"Records in this page: {df.count()}")
 ```
 
-Expected output: `_delta_log/` folder and `part-*.parquet` files.
-
-```python
-df = spark.read.format("delta").load(abfss("bronze", "api/payments/"))
-print(f"Total rows: {df.count():,}")
-display(df.limit(5))
-```
+Expected output — a DataFrame with payment fields: `payment_id`, `session_id`, `customer_id`, `amount_aud`, `status`, etc.
 
 ---
 
@@ -410,15 +421,30 @@ display(df.limit(5))
 
 | Error | Cause | Fix |
 |---|---|---|
-| `401 Unauthorized` from login Web Activity | Username or password secret wrong in Key Vault | Check `voltgrid-username` and `voltgrid-password` values in Key Vault |
-| `Until loop runs forever` | `v_total_pages` variable not updated from pagination rule | Check pagination rule — JSON path must be `$.pagination.total_pages` and variable must be `v_total_pages` |
-| `Copy writes 0 rows` | Collection reference wrong — data is under `data[]` not root | In Mapping tab, set Collection reference to `$.data` |
-| `Delta write fails: 403` | ADF MI missing `Storage Blob Data Contributor` on `evdatalakedev` | Day 2 Part 2 — assign the role, wait 2 min, retry |
-| `Key Vault access denied` in Web Activity | ADF MI missing `Key Vault Secrets User` on Key Vault | Day 2 Part 3 — assign the role, wait 2 min, retry |
-| `Notebook activity fails: cluster not running` | `dev-cluster` was terminated | Start `dev-cluster` first, or switch to Job cluster in `ls_databricks` |
+| `act_get_username` fails with 403 | ADF Managed Identity missing `Key Vault Secrets User` role | Portal → Key Vault → IAM → assign role to ADF MI, wait 2 min |
+| `act_api_login` fails with 401 | Wrong credentials in Key Vault | Check `voltgrid-username` and `voltgrid-password` values |
+| `act_copy_payments` fails with 401 | Token not stored — `act_api_login` output key is wrong | Monitor → `act_api_login` output → confirm `.output.token` key exists |
+| `act_copy_payments` fails with 403 | ADF MI missing `Storage Blob Data Contributor` on `evdatalakedev` | Portal → Storage → IAM → assign role, wait 2 min |
+| Output file is empty | API returned 0 records | Test with `p_page_size=10` first; verify linked service URL |
+| Dataset `ds_voltgrid_payments_src` not found | Dataset was not published before pasting pipeline | Create and publish both datasets before pasting the pipeline JSON |
+
+---
+
+## What Day 3 Adds
+
+Day 2 proves the connection works. Day 3 (`day_3_*/adf_pipeline_json/`) upgrades to:
+
+| Feature | Day 2 | Day 3 |
+|---|---|---|
+| Pages fetched | 1 (manual parameter) | All pages (Until loop) |
+| Load type | Full only | Full + incremental (`updated_after` watermark) |
+| Watermark source | None — manual input | Auto-read from `pipeline_audit` Delta table |
+| Audit trail | None | Row written to `pipeline_audit` after every run |
+| Sink path | Fixed `payments.json` | Partitioned `ingestion_date=YYYY-MM-DD/page_N.json` |
+| Pipeline | `pl_bronze_api_payments` | `pl_bronze_api_payments_v3` |
 
 ---
 
 ## Next Step
 
-→ `03_ADF_PIPELINE_BLOB_SESSIONS.md` — build the blob charging sessions pipeline
+→ `05_UNITY_CATALOG_EXTERNAL_LOCATIONS.md` — set up Access Connector, Storage Credential, External Locations, and Volumes
