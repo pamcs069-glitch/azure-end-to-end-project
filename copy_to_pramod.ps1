@@ -1,40 +1,88 @@
+Clear-Host
+
 Write-Host ""
-Write-Host "==============================================" -ForegroundColor Cyan
-Write-Host " Azure Course - Copy Instructor Content" -ForegroundColor Cyan
-Write-Host "==============================================" -ForegroundColor Cyan
+Write-Host "=========================================================" -ForegroundColor Cyan
+Write-Host "      Azure Data Engineering Course Sync Utility"
+Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host ""
 
-$created = 0
-$skipped = 0
+$createdFolders = 0
+$createdFiles   = 0
+$skippedFiles   = 0
+
+$ignoreFolders = @(
+    ".git",
+    ".ipynb_checkpoints",
+    "__pycache__",
+    "pramod"
+)
 
 Get-ChildItem -Directory | Where-Object {
     $_.Name -like "day_*"
 } | ForEach-Object {
 
-    $source = $_.FullName
-    $target = Join-Path ".\pramod" $_.Name
+    $sourceFolder = $_.FullName
+    $targetFolder = Join-Path ".\pramod" $_.Name
 
-    if (!(Test-Path $target)) {
+    if (!(Test-Path $targetFolder)) {
 
-        Copy-Item $source $target -Recurse
+        New-Item -ItemType Directory -Path $targetFolder -Force | Out-Null
 
-        Write-Host "Created: $($_.Name)" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "Created folder: $($_.Name)" -ForegroundColor Green
 
-        $created++
-
+        $createdFolders++
     }
-    else {
 
-        Write-Host "Skipped: $($_.Name) already exists" -ForegroundColor Yellow
+    Get-ChildItem $sourceFolder -Recurse | ForEach-Object {
 
-        $skipped++
+        if ($_.PSIsContainer) {
+            return
+        }
+
+        foreach ($ignore in $ignoreFolders) {
+            if ($_.FullName -like "*\$ignore\*") {
+                return
+            }
+        }
+
+        $relativePath = $_.FullName.Substring($sourceFolder.Length).TrimStart('\')
+
+        $destination = Join-Path $targetFolder $relativePath
+
+        $destinationFolder = Split-Path $destination
+
+        if (!(Test-Path $destinationFolder)) {
+            New-Item -ItemType Directory -ItemType Directory -Force -Path $destinationFolder | Out-Null
+        }
+
+        if (!(Test-Path $destination)) {
+
+            Copy-Item $_.FullName $destination
+
+            Write-Host "  + $relativePath" -ForegroundColor Green
+
+            $createdFiles++
+        }
+        else {
+
+            $skippedFiles++
+
+        }
 
     }
 
 }
 
 Write-Host ""
+Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "Summary" -ForegroundColor Cyan
-Write-Host "Created : $created"
-Write-Host "Skipped : $skipped"
+Write-Host "=========================================================" -ForegroundColor Cyan
+
+Write-Host "New folders : $createdFolders" -ForegroundColor Green
+Write-Host "New files   : $createdFiles" -ForegroundColor Green
+Write-Host "Skipped     : $skippedFiles" -ForegroundColor Yellow
+
+Write-Host ""
+Write-Host "Instructor content synchronized successfully." -ForegroundColor Cyan
 Write-Host ""
