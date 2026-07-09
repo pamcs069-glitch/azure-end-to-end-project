@@ -306,24 +306,24 @@
 
       {
         "name": "act_write_audit",
-        "description": "Copy Activity — appends one audit row to bronze/audit/pipeline_audit.csv via ls_adls_bronze. Always runs after both status activities. Source is the same CSV (additional columns inject dynamic values). Sink appends to the same file.",
+        "description": "Copy Activity — appends one audit row to bronze/audit/pipeline_audit.csv via ls_adls_bronze. Runs after either status activity (Succeeded or Skipped) so it always executes. additionalColumns adds only the new dynamic columns not already in the CSV header.",
         "type": "Copy",
         "dependsOn": [
-          { "activity": "act_set_status_success", "dependencyConditions": ["Succeeded"] },
-          { "activity": "act_set_status_failed",  "dependencyConditions": ["Succeeded"] }
+          { "activity": "act_set_status_success", "dependencyConditions": ["Succeeded", "Skipped"] },
+          { "activity": "act_set_status_failed",  "dependencyConditions": ["Succeeded", "Skipped"] }
         ],
         "typeProperties": {
           "source": {
             "type": "DelimitedTextSource",
             "additionalColumns": [
               { "name": "pipeline_name",   "value": "pl_bronze_api_payments_v3" },
-              { "name": "load_type",       "value": { "value": "@pipeline().parameters.p_load_type",        "type": "Expression" } },
-              { "name": "watermark_value", "value": { "value": "@variables('v_watermark')",                 "type": "Expression" } },
-              { "name": "ingestion_date",  "value": { "value": "@variables('v_ingestion_date')",            "type": "Expression" } },
-              { "name": "total_pages",     "value": { "value": "@string(variables('v_total_pages'))",       "type": "Expression" } },
-              { "name": "status",          "value": { "value": "@variables('v_status')",                    "type": "Expression" } },
-              { "name": "pipeline_run_id", "value": { "value": "@pipeline().RunId",                         "type": "Expression" } },
-              { "name": "run_timestamp",   "value": { "value": "@utcNow()",                                 "type": "Expression" } }
+              { "name": "load_type",       "value": { "value": "@pipeline().parameters.p_load_type",  "type": "Expression" } },
+              { "name": "watermark_value", "value": { "value": "@variables('v_watermark')",            "type": "Expression" } },
+              { "name": "ingestion_date",  "value": { "value": "@variables('v_ingestion_date')",       "type": "Expression" } },
+              { "name": "total_pages",     "value": { "value": "@string(variables('v_total_pages'))",  "type": "Expression" } },
+              { "name": "status",          "value": { "value": "@variables('v_status')",               "type": "Expression" } },
+              { "name": "pipeline_run_id", "value": { "value": "@pipeline().RunId",                    "type": "Expression" } },
+              { "name": "run_timestamp",   "value": { "value": "@utcNow()",                            "type": "Expression" } }
             ],
             "storeSettings": {
               "type": "AzureBlobFSReadSettings",
@@ -349,7 +349,7 @@
         },
         "inputs": [
           {
-            "referenceName": "ds_pipeline_audit_csv",
+            "referenceName": "ds_pipeline_audit_csv_noheader",
             "type": "DatasetReference"
           }
         ],
