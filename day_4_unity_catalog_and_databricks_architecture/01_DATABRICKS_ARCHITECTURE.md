@@ -3,6 +3,132 @@
 
 ---
 
+## What Is Databricks?
+
+Databricks is a **unified data intelligence platform** built on top of Apache Spark. It gives you a managed environment where you can ingest, process, transform, and analyse large-scale data — combining a data warehouse, a data lake, and a machine learning platform into one product (called a **Lakehouse**).
+
+Founded in 2013 by the creators of Apache Spark, Databricks sits between raw cloud infrastructure (ADLS, S3, GCS) and the tools that consume data (Power BI, ML models, dashboards). It handles the hard parts: distributed compute, cluster lifecycle, scheduling, governance, and optimised query execution.
+
+**In one line:** Databricks is a managed Apache Spark environment with governance (Unity Catalog), orchestration (Workflows), and SQL analytics built on top — running inside your own cloud subscription.
+
+---
+
+## How Databricks Compares to Its Alternatives
+
+### The Landscape
+
+```
+                  ┌──────────────────────────────────────────────────────┐
+                  │          DATA PLATFORM LANDSCAPE                     │
+                  │                                                      │
+  PURE WAREHOUSE  │  Snowflake ─── Azure Synapse ─── BigQuery            │
+  (SQL-first,     │       ↑              ↑               ↑               │
+   closed storage)│    proprietary    hybrid          GCS-native         │
+                  │                                                      │
+  LAKEHOUSE       │  Databricks ─────────────────── Apache Iceberg       │
+  (open storage,  │  (open Delta Lake, any cloud)   (open table format,  │
+   compute+govern)│                                  needs own compute)  │
+                  │                                                      │
+  PURE STREAMING  │  Azure Stream Analytics ─── Confluent (Kafka)        │
+                  │                                                      │
+                  └──────────────────────────────────────────────────────┘
+```
+
+---
+
+### Databricks vs Snowflake
+
+Snowflake is the most common alternative. Both are enterprise data platforms, but they are built on fundamentally different philosophies.
+
+| Dimension | Databricks | Snowflake |
+|---|---|---|
+| **Storage format** | Open — Delta Lake (Parquet + transaction log). Your files on ADLS/S3/GCS. You own the data. | Proprietary. Data loaded INTO Snowflake's internal storage. You don't own the raw files. |
+| **Compute model** | You bring clusters (VMs in YOUR subscription). You pay Azure for the VMs directly. | Snowflake manages "virtual warehouses" — compute is inside Snowflake's cloud, billed per second via Snowflake credits. |
+| **Primary language** | Python (PySpark), SQL, Scala, R | SQL-first. Python supported via Snowpark but SQL is the primary interface. |
+| **ML / AI** | First-class. MLflow built in. Train models, serve endpoints, run LLMs on the same platform. | Not native. Snowflake ML exists but is limited — ML teams typically export data to external tools. |
+| **Streaming data** | Native via Spark Structured Streaming + Delta Live Tables. Real-time ingestion into Delta tables. | Limited. Snowpipe for micro-batch near-real-time. Not designed for true streaming. |
+| **Schema on read vs write** | Both. Bronze = schema on read (raw CSV). Silver = Delta enforces schema on write. | Schema on write always. Data must match table schema at load time. |
+| **Data governance** | Unity Catalog — fine-grained column/row level, lineage, external locations | Snowflake's own access controls. Horizon (governance layer) — similar capability but closed. |
+| **Cost model** | Compute = Azure VM cost (billed by Azure, not Databricks). Storage = ADLS cost (cheap). Databricks charges a DBU (Databricks Unit) on top per node. | Per credit — storage + compute bundled. Can be expensive at scale. Easier to predict. |
+| **Vendor lock-in** | Low. Delta Lake is open source. If you stop using Databricks, your Parquet files on ADLS are still readable by Spark, Athena, BigQuery, etc. | High. Data inside Snowflake can be unloaded but the format is proprietary. |
+| **Best for** | Large-scale ETL, ML, mixed workloads (SQL + Python + streaming). Teams with data engineers who write code. | Pure SQL analytics, BI reporting, business analysts. Teams that want a managed warehouse without writing Spark code. |
+| **In our EV project** | Ingesting CSV from blob, transforming with PySpark, writing Delta tables — ideal Databricks use case. | Could handle the SQL analytics layer (Gold) but not the ingestion or ML components without additional tools. |
+
+**When to choose Snowflake over Databricks:** If your team is 100% SQL-focused, you have no ML requirements, and you want zero infrastructure management — Snowflake is simpler to operate. It handles query optimisation, storage, and warehousing automatically without you managing VMs or clusters.
+
+**When to choose Databricks over Snowflake:** When you need Python + SQL together, when you're building ML models on the same data, when you have streaming workloads, or when you need to keep costs low at large scale (ADLS storage is cheaper than Snowflake storage).
+
+---
+
+### Databricks vs Azure Synapse Analytics
+
+Azure Synapse is Microsoft's answer to the same space — a hybrid warehouse + Spark platform.
+
+| Dimension | Databricks | Azure Synapse Analytics |
+|---|---|---|
+| **Spark engine** | Optimised Databricks Runtime (DBR) — proprietary enhancements on top of open-source Spark. Photon engine for vectorised execution. | Standard open-source Spark via "Spark pools". No Photon. Generally slower for complex Spark workloads. |
+| **SQL engine** | Databricks SQL Warehouse — serverless SQL on Delta tables. | Dedicated SQL Pool (formerly SQL DW) — provisioned T-SQL warehouse. Serverless SQL Pool for ad-hoc queries on ADLS files. |
+| **Integration with Azure** | Works well but is a third-party product — some extra setup (Access Connectors, linked services). | Native to Azure — shares the same portal, IAM roles, no extra auth layers for ADLS access. |
+| **Unity Catalog** | Full Unity Catalog — metastore, external locations, column/row security, lineage. | Purview + Synapse access controls — separate governance system, not unified with Spark. |
+| **Delta Lake** | Delta Lake is Databricks' core format — fully optimised. | Synapse supports Delta Lake but it is not the primary format. Parquet and dedicated SQL pools are more common. |
+| **Cost** | DBU cost on top of Azure VM cost. For heavy Spark workloads, Databricks is often cheaper because its optimised runtime does more per CPU. | Dedicated SQL Pool is expensive per DWU (billed hourly even when idle unless paused). Serverless is cheaper. |
+| **MLflow / ML** | MLflow built into Databricks. Model serving, experiment tracking, feature store native. | Azure ML is the Microsoft ML platform — separate service, separate UI. Not integrated into Synapse. |
+| **Best for** | Teams who want the best Spark performance, Unity Catalog governance, and ML capabilities — and are willing to pay the DBU premium. | Teams already deep in the Microsoft ecosystem who want minimum friction with Azure IAM, Azure DevOps, Power BI — and whose workloads are SQL-heavy. |
+| **In our EV project** | We use Databricks — it gives us the best Spark runtime for the ingestion jobs, Unity Catalog for governance, and the path to ML (charging pattern prediction, anomaly detection) later in the project. | Synapse would have been a viable alternative for the SQL and ingestion parts, but ML integration is weaker. |
+
+---
+
+### Databricks vs Google BigQuery
+
+BigQuery is Google Cloud's managed data warehouse.
+
+| Dimension | Databricks | BigQuery |
+|---|---|---|
+| **Cloud** | Any cloud (Azure, AWS, GCP). Multi-cloud with Unity Catalog. | Google Cloud only (though BigQuery Omni extends to S3/Azure via Anthos — limited). |
+| **Storage** | Your ADLS/S3/GCS. Open Delta Lake format. | Google's Colossus storage. Data loaded into BigQuery is stored in Google's proprietary Capacitor format. |
+| **Compute** | You manage clusters (or use serverless SQL Warehouse). | Fully serverless — no clusters, no provisioning. BigQuery auto-scales invisibly. |
+| **SQL dialect** | ANSI SQL + Spark SQL extensions | Standard SQL (BigQuery dialect) — some differences from ANSI |
+| **Python / ML** | Native PySpark, MLflow, model serving | BigQuery ML for in-warehouse ML. Python via notebooks (Colab integration). Not as comprehensive as Databricks for complex ML. |
+| **Streaming** | Spark Structured Streaming, Delta Live Tables | BigQuery Storage Write API for streaming inserts — very capable, but SQL-centric. |
+| **Cost model** | Compute = VM cost + DBU. Storage = ADLS (cheap flat rate). | On-demand: $5/TB scanned. Flat-rate / reservations: capacity-based pricing. No separate compute cost — pay per query. |
+| **Best for** | Code-heavy teams, ML use cases, open format, multi-cloud. | Fully serverless SQL analytics at scale with minimal ops overhead, especially in GCP environments. |
+
+---
+
+### One-Line Summary of When to Use Each
+
+| Platform | Use it when... |
+|---|---|
+| **Databricks** | You write code (Python + SQL), need ML, have streaming data, want open storage format (Delta), and need governance at scale |
+| **Snowflake** | Your team is SQL-only, you want zero infrastructure management, and you don't need ML or streaming on the same platform |
+| **Azure Synapse** | You're already all-in on Azure, your workload is SQL-heavy, and you want native Azure IAM without extra setup |
+| **BigQuery** | You're on Google Cloud and want serverless SQL with no cluster management |
+| **Apache Spark on its own** | You want full control and will manage clusters yourself (no governance, no UI, no support) |
+
+---
+
+## What Makes Databricks Unique (The Lakehouse Idea)
+
+Traditional architectures separated data lakes (cheap storage, no structure, no transactions) from data warehouses (expensive, structured, ACID transactions). You needed both — a lake for raw data and a warehouse for clean analytics.
+
+```
+OLD ARCHITECTURE (two systems, data copied between them):
+  Raw data → Data Lake (S3/ADLS) → ETL job → Data Warehouse (Redshift/Synapse)
+                ↑                                      ↑
+          cheap, flexible,                    expensive, structured,
+          no transactions                     ACID, queryable
+
+DATABRICKS LAKEHOUSE (one system):
+  Raw data → Bronze (Delta Lake on ADLS) → Silver (Delta) → Gold (Delta)
+                                    ↑
+                  Delta Lake gives you: ACID + schema + time travel + cheap storage
+                  Same files work for: Python ML, SQL queries, streaming ingestion
+```
+
+Delta Lake collapses the two systems into one by adding a transaction log (`_delta_log/`) on top of Parquet files — giving you warehouse-grade reliability with data lake storage costs. This is the foundation of everything in our EV project.
+
+---
+
 ## Architecture Diagram
 
 ```
