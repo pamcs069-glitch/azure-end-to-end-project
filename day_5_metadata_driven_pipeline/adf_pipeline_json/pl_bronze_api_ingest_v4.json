@@ -102,7 +102,7 @@
 
       {
         "name": "act_get_watermark",
-        "description": "Lookup — reads first row of bronze/audit/pipeline_audit.csv filtered by entity_name to get the last successful watermark for THIS entity.",
+        "description": "Lookup — reads bronze/audit/pipeline_audit_<entity_name>.csv which is a per-entity single-row watermark file. Each entity has its own file so firstRowOnly always returns the correct watermark for this entity. This avoids the multi-entity CSV firstRowOnly bug.",
         "type": "Lookup",
         "dependsOn": [
           { "activity": "act_set_ingestion_date", "dependencyConditions": ["Succeeded"] }
@@ -120,8 +120,14 @@
             }
           },
           "dataset": {
-            "referenceName": "ds_pipeline_audit_csv",
-            "type": "DatasetReference"
+            "referenceName": "ds_pipeline_audit_entity_csv",
+            "type": "DatasetReference",
+            "parameters": {
+              "p_entity_name": {
+                "value": "@pipeline().parameters.p_entity_name",
+                "type": "Expression"
+              }
+            }
           },
           "firstRowOnly": true
         }
@@ -129,7 +135,7 @@
 
       {
         "name": "act_set_watermark",
-        "description": "Full load: epoch constant. Incremental: use watermark_value from the CSV Lookup result.",
+        "description": "Full load: epoch constant. Incremental: use watermark_value from the per-entity audit CSV.",
         "type": "SetVariable",
         "dependsOn": [
           { "activity": "act_get_watermark", "dependencyConditions": ["Succeeded"] }
@@ -308,7 +314,7 @@
 
       {
         "name": "act_write_audit",
-        "description": "Append one audit row to pipeline_audit.csv. Always runs whether entity succeeded or failed. entity_name is written so the next incremental run can look up the correct watermark per entity.",
+        "description": "Append one audit row to the shared pipeline_audit.csv. Always runs whether entity succeeded or failed.",
         "type": "Copy",
         "dependsOn": [
           { "activity": "act_set_status_success", "dependencyConditions": ["Succeeded", "Skipped"] },
@@ -358,6 +364,64 @@
           {
             "referenceName": "ds_pipeline_audit_csv",
             "type": "DatasetReference"
+          }
+        ]
+      },
+
+      {
+        "name": "act_write_watermark",
+        "description": "Overwrite bronze/audit/watermark_<entity_name>.csv with a single row containing the current run_timestamp as the new watermark_value. Only runs on success so a failed run never advances the watermark. Next incremental run reads this file via ds_pipeline_audit_entity_csv to get the correct per-entity watermark.",
+        "type": "Copy",
+        "dependsOn": [
+          { "activity": "act_write_audit", "dependencyConditions": ["Succeeded"] },
+          { "activity": "act_set_status_success", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "DelimitedTextSource",
+            "additionalColumns": [
+              { "name": "watermark_value", "value": { "value": "@utcNow()", "type": "Expression" } },
+              { "name": "entity_name",     "value": { "value": "@pipeline().parameters.p_entity_name", "type": "Expression" } },
+              { "name": "updated_at",      "value": { "value": "@utcNow()", "type": "Expression" } }
+            ],
+            "storeSettings": {
+              "type": "AzureBlobFSReadSettings",
+              "recursive": false,
+              "enablePartitionDiscovery": false
+            },
+            "formatSettings": {
+              "type": "DelimitedTextReadSettings"
+            }
+          },
+          "sink": {
+            "type": "DelimitedTextSink",
+            "storeSettings": {
+              "type": "AzureBlobFSWriteSettings"
+            },
+            "formatSettings": {
+              "type": "DelimitedTextWriteSettings",
+              "quoteAllText": false,
+              "fileExtension": ".csv"
+            }
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_pipeline_audit_csv_noheader",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_pipeline_audit_entity_csv",
+            "type": "DatasetReference",
+            "parameters": {
+              "p_entity_name": {
+                "value": "@pipeline().parameters.p_entity_name",
+                "type": "Expression"
+              }
+            }
           }
         ]
       }
