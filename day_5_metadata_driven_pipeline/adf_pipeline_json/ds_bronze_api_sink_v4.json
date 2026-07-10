@@ -17,7 +17,7 @@
         "type": "AzureBlobFSLocation",
         "fileSystem": "bronze",
         "folderPath": {
-          "value": "@concat(dataset().p_entity_name, '/ingestion_date=', dataset().p_ingestion_date)",
+          "value": "@concat('api/', dataset().p_entity_name, '/ingestion_date=', dataset().p_ingestion_date)",
           "type": "Expression"
         },
         "fileName": {
