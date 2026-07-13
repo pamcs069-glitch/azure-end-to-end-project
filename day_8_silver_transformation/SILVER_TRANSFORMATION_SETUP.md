@@ -1,7 +1,7 @@
 # Day 8 — Silver Layer: API Data Transformation
 **Notebook:** `01_silver_api_transformation.ipynb`
 **Source:** Bronze Volume JSON (`/Volumes/dbw_ev_intelligence_dev/default/bronze-volume/api/`)
-**Sink:** Silver Volume Delta (`/Volumes/dbw_ev_intelligence_dev/silver/silver-volume/api/`)
+**Sink:** Silver Volume Delta (`/Volumes/dbw_ev_intelligence_dev/default/silver-volume/api/`)
 
 ---
 
@@ -47,10 +47,10 @@ Silver Volume
 ## Silver Volume Path
 
 ```
-/Volumes/dbw_ev_intelligence_dev/silver/silver-volume/api/<entity>/
+/Volumes/dbw_ev_intelligence_dev/default/silver-volume/api/<entity>/
 ```
 
-> This path requires a Unity Catalog Volume named `silver-volume` in the `silver` schema (or the `default` schema, depending on your UC setup). See Prerequisites below.
+Uses the same `default` schema as Bronze — `silver-volume` is a separate Volume under the same catalog/schema as `bronze-volume`. No new schema creation needed.
 
 ---
 
@@ -67,21 +67,26 @@ Silver Volume
 
 ## Part A — Create the Silver Volume (One-Time Setup)
 
-If the Silver Volume does not exist yet:
+Silver uses the same `default` schema as Bronze. You only need to create one new Volume.
 
 1. Databricks → left sidebar → **Catalog** (catalog icon)
-2. Expand `dbw_ev_intelligence_dev` catalog
-3. If `silver` schema does not exist:
-   - Right-click catalog → **Create schema** → name: `silver`
-4. Click the `silver` schema → **Create volume**
-   - Volume name: `silver-volume`
-   - Volume type: `External` (points to your ADLS silver container)
-   - Storage location: `abfss://silver@evdatalakedev.dfs.core.windows.net/`
-5. Click **Create**
+2. Expand `dbw_ev_intelligence_dev` catalog → click **default** schema
+3. Click **+** → **Create volume**
+   - **Volume name:** `silver-volume`
+   - **Volume type:** `External`
+   - **External location:** `evdatalakedev-silver` (already set up in Day 2)
+   - **Path:** leave blank (root of the silver container)
+4. Click **Create**
+
+Or via SQL in any notebook:
+```sql
+CREATE EXTERNAL VOLUME IF NOT EXISTS dbw_ev_intelligence_dev.default.`silver-volume`
+  LOCATION 'abfss://silver@evdatalakedev.dfs.core.windows.net/';
+```
 
 Verify the path resolves:
 ```python
-dbutils.fs.ls("/Volumes/dbw_ev_intelligence_dev/silver/silver-volume/")
+dbutils.fs.ls("/Volumes/dbw_ev_intelligence_dev/default/silver-volume/")
 ```
 
 ---
@@ -325,7 +330,7 @@ Every Silver row gets 3 additional columns:
 ## Verify Silver Contents (Any Notebook)
 
 ```python
-SILVER_VOLUME = "/Volumes/dbw_ev_intelligence_dev/silver/silver-volume"
+SILVER_VOLUME = "/Volumes/dbw_ev_intelligence_dev/default/silver-volume"
 
 # List all Silver Delta tables
 for entity in ["payments", "sessions", "customers", "weather"]:
