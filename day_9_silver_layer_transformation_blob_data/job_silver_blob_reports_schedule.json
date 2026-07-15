@@ -1,0 +1,46 @@
+{
+  "name": "job_silver_blob_reports_monthly",
+  "description": "Silver transformation for monthly JSON reports (kpi_report, sla_report, state_breakdown). Runs on the 2nd of each month after Bronze report files are written — reads Bronze JSON, flattens nested fields, applies data quality, writes to three Silver Delta tables.",
+
+  "schedule": {
+    "quartz_cron_expression": "0 0 2 2 * ?",
+    "timezone_id": "UTC",
+    "pause_status": "UNPAUSED"
+  },
+
+  "tasks": [
+    {
+      "task_key": "silver_reports_transform",
+      "description": "Run Silver report transformation for all 3 report types. Reads Bronze JSON from bronze-volume/reports/YYYY/MM/, flattens each report type, writes Silver Delta tables.",
+      "notebook_task": {
+        "notebook_path": "/Shared/silver_transformation/09_silver_blob_reports_job_params_v3",
+        "base_parameters": {
+          "load_type"       : "incremental",
+          "ingestion_year"  : "{{job.start_time.iso_date | date_format: 'yyyy'}}",
+          "ingestion_month" : "{{job.start_time.iso_date | date_format: 'MM'}}"
+        },
+        "source": "WORKSPACE"
+      },
+      "existing_cluster_id": "<your-dev-cluster-id>",
+      "timeout_seconds": 1800,
+      "max_retries": 1,
+      "min_retry_interval_millis": 600000
+    }
+  ],
+
+  "job_clusters": [],
+
+  "email_notifications": {
+    "on_failure": ["<your-email@domain.com>"],
+    "no_alert_for_skipped_runs": true
+  },
+
+  "max_concurrent_runs": 1,
+
+  "tags": {
+    "layer"  : "silver",
+    "source" : "blob",
+    "entity" : "reports",
+    "day"    : "9"
+  }
+}

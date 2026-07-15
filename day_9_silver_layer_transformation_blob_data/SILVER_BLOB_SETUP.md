@@ -1,14 +1,32 @@
-# Day 9 — Silver Layer: Blob Realtime Data Transformation
+# Day 9 — Silver Layer: Blob Data Transformation
 
-## Three Notebooks — Learning Progression
+## All notebooks
+
+### Part A — Realtime blob (CSV): charging_sessions + maintenance_events
 
 | Notebook | Scope | Purpose |
 |---|---|---|
 | `01_silver_charging_sessions_simple_v1.ipynb` | charging_sessions only | Every step written explicitly — no functions, no loops. Full overwrite. |
 | `02_silver_blob_all_entities_forloop_v2.ipynb` | charging_sessions + maintenance_events | Same logic wrapped in a for loop. Full overwrite. |
-| `03_silver_blob_all_entities_job_params_v3.ipynb` | charging_sessions + maintenance_events | Production — job parameters only, data quality pipeline, Delta MERGE, attaches to existing Databricks job. |
+| `03_silver_blob_all_entities_job_params_v3.ipynb` | charging_sessions + maintenance_events | Production — job parameters only, data quality pipeline, Delta MERGE. |
 
 **Teach in order: v1 → v2 → v3**
+
+### Part B — Invoice metadata (Bronze Delta → Silver Delta)
+
+| Notebook | Scope | Purpose |
+|---|---|---|
+| `04_silver_blob_invoices_v1.ipynb` | invoices only | Single entity, every step explicit. Full overwrite. |
+| `05_silver_blob_invoices_forloop_v2.ipynb` | invoices (extensible to other batch entities) | Entity config list + for loop. Full overwrite. |
+| `06_silver_blob_invoices_job_params_v3.ipynb` | invoices | Production — job parameters only, data quality, Delta MERGE. |
+
+### Part C — Monthly reports (Bronze JSON → Silver Delta)
+
+| Notebook | Scope | Purpose |
+|---|---|---|
+| `07_silver_blob_reports_v1.ipynb` | kpi_report only | Single report type, every step explicit. Full overwrite. |
+| `08_silver_blob_reports_forloop_v2.ipynb` | kpi_report + sla_report + state_breakdown | Report config list + per-type flatten functions + for loop. Full overwrite. |
+| `09_silver_blob_reports_job_params_v3.ipynb` | all 3 report types | Production — job parameters only, data quality, Delta MERGE. |
 
 ---
 
@@ -153,19 +171,110 @@ If you need to reprocess a specific hour without re-running Bronze:
 
 | Job | Cron | What runs |
 |---|---|---|
-| `job_bronze_realtime_hourly` | `0 0 * * * ?` (every hour on the hour) | Bronze task: blob CSV → Bronze Volume |
-| Silver task (attached) | Runs after Bronze task succeeds | Silver task: Bronze CSV → Silver Delta |
+| `job_bronze_realtime_hourly` | `0 0 * * * ?` (every hour on the hour) | Bronze: blob CSV → Bronze Volume |
+| Silver realtime (attached to above) | Runs after Bronze task succeeds | Silver: Bronze CSV → Silver Delta (charging_sessions, maintenance_events) |
+| `job_silver_blob_invoices_daily` | `0 30 1 * * ?` (01:30 UTC daily) | Silver: invoice metadata Bronze → Silver Delta |
+| `job_silver_blob_reports_monthly` | `0 0 2 2 * ?` (02:00 UTC on 2nd of each month) | Silver: all 3 JSON report types → Silver Delta |
 
-Bronze runs at :00, Silver starts immediately after Bronze completes (~:05–:10 each hour).
+---
+
+## Part D — Invoice Silver setup
+
+### Step 1 — Upload invoice v3 notebook
+1. Databricks → **Workspace** → **Shared** → `silver_transformation`
+2. **Import** → select `06_silver_blob_invoices_job_params_v3.ipynb`
+3. Confirm path: `/Shared/silver_transformation/06_silver_blob_invoices_job_params_v3`
+
+### Step 2 — Option A: Attach to existing invoice Bronze job
+
+If you have `job_bronze_invoices_daily` already running (from Day 6):
+1. Databricks → **Workflows** → **Jobs** → open `job_bronze_invoices_daily`
+2. **+ Add task** → **Notebook**
+3. Configure:
+
+| Field | Value |
+|---|---|
+| Task name | `silver_invoices_transform` |
+| Path | `/Shared/silver_transformation/06_silver_blob_invoices_job_params_v3` |
+| Depends on | `<bronze invoice task name>` |
+
+4. Parameters:
+
+| Key | Value |
+|---|---|
+| `load_type` | `incremental` |
+| `ingestion_year` | `{{job.start_time.iso_date \| date_format: 'yyyy'}}` |
+| `ingestion_month` | `{{job.start_time.iso_date \| date_format: 'MM'}}` |
+| `ingestion_day` | `{{job.start_time.iso_date \| date_format: 'dd'}}` |
+
+### Step 2 — Option B: Create standalone invoice Silver job
+
+Import `job_silver_blob_invoices_schedule.json` via Databricks Jobs API:
+```bash
+curl -X POST https://<your-workspace>.azuredatabricks.net/api/2.1/jobs/create \
+  -H "Authorization: Bearer <token>" \
+  -d @job_silver_blob_invoices_schedule.json
+```
+
+---
+
+## Part E — Reports Silver setup
+
+### Step 1 — Upload reports v3 notebook
+1. Databricks → **Workspace** → **Shared** → `silver_transformation`
+2. **Import** → select `09_silver_blob_reports_job_params_v3.ipynb`
+3. Confirm path: `/Shared/silver_transformation/09_silver_blob_reports_job_params_v3`
+
+### Step 2 — Create standalone reports Silver job
+
+Reports are monthly so a standalone job makes more sense than attaching to Bronze (which runs daily).
+
+Import `job_silver_blob_reports_schedule.json` via Databricks Jobs API:
+```bash
+curl -X POST https://<your-workspace>.azuredatabricks.net/api/2.1/jobs/create \
+  -H "Authorization: Bearer <token>" \
+  -d @job_silver_blob_reports_schedule.json
+```
+
+Or create manually via UI:
+1. Databricks → **Workflows** → **+ Create job**
+2. Name: `job_silver_blob_reports_monthly`
+3. Schedule: **Monthly**, 2nd day of month, 02:00 UTC
+4. Task → Notebook: `/Shared/silver_transformation/09_silver_blob_reports_job_params_v3`
+5. Parameters:
+
+| Key | Value |
+|---|---|
+| `load_type` | `incremental` |
+| `ingestion_year` | `{{job.start_time.iso_date \| date_format: 'yyyy'}}` |
+| `ingestion_month` | `{{job.start_time.iso_date \| date_format: 'MM'}}` |
+
+> **Why 2nd of the month?** Bronze report files are written on the 1st (end-of-month reports).
+> Running Silver on the 2nd gives Bronze time to complete and upload all 3 files.
 
 ---
 
 ## Silver Delta table reference
 
+### Realtime (CSV)
 | Entity | Natural Key | CDC Field | Silver Path |
 |---|---|---|---|
 | charging_sessions | `session_id` | `updated_at` | `.../realtime/charging_sessions/` |
 | maintenance_events | `event_id` | `updated_at` | `.../realtime/maintenance_events/` |
+
+### Invoices (PDF metadata)
+| Entity | Natural Key | Silver Path |
+|---|---|---|
+| invoices | `invoice_id` | `.../invoices/` |
+| quarantine | — | `.../quarantine/invoices/` |
+
+### Reports (JSON)
+| Report | MERGE Key | Silver Path |
+|---|---|---|
+| kpi_report | `report_period` | `.../reports/kpi_report/` |
+| sla_report | `report_period` | `.../reports/sla_report/` |
+| state_breakdown | `report_period` + `state_code` | `.../reports/state_breakdown/` |
+| quarantine (each) | — | `.../quarantine/reports/<type>/` |
 
 ---
 
@@ -175,6 +284,8 @@ Bronze runs at :00, Silver starts immediately after Bronze completes (~:05–:10
 |---|---|---|
 | `Parameter 'load_type' was not provided` | Notebook run directly without job params | Run via Databricks Job only (v3 is production) |
 | `No Bronze CSV files found for given partition` | Bronze task hasn't run yet or partition path wrong | Check: `dbutils.fs.ls(".../bronze-volume/realtime/charging_sessions/YYYY/MM/DD/HH/")` |
-| `AnalysisException: Path does not exist` | Silver Volume not created | Create `silver-volume` Volume under `dbw_ev_intelligence_dev.default` (same as Day 8) |
-| `silver=0` for numeric entities | Corrupt check was firing on legitimate NULLs | v3 uses pre-cast sentinel fix — this should not happen |
+| `Bronze metadata table not found` | Invoice Bronze not run yet | Run `day_6/04_bronze_blob_invoices_pdf.ipynb` first |
+| `<N> report file(s) missing in Bronze` | Report Bronze not run for that month | Run `day_6/05_bronze_blob_reports_json.ipynb` for same year/month |
+| `AnalysisException: Path does not exist` | Silver Volume not created | Create `silver-volume` Volume under `dbw_ev_intelligence_dev.default` |
+| `silver=0` for numeric entities | Corrupt check firing on legitimate NULLs | v3 uses pre-cast sentinel fix — this should not happen |
 | Silver task shows as Skipped | Bronze task failed | Fix Bronze task failure first — Silver depends on Bronze success |
