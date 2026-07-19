@@ -1,0 +1,47 @@
+{
+  "name": "job_silver_blob_invoices_daily",
+  "description": "Silver transformation for blob invoice metadata. Runs daily after job_bronze_invoices_daily completes — reads Bronze invoice metadata Delta table, casts/enriches types, applies data quality, writes to Silver Delta (MERGE on invoice_id).",
+
+  "schedule": {
+    "quartz_cron_expression": "0 30 1 * * ?",
+    "timezone_id": "UTC",
+    "pause_status": "UNPAUSED"
+  },
+
+  "tasks": [
+    {
+      "task_key": "silver_invoices_transform",
+      "description": "Run Silver invoice metadata transformation. Reads Bronze _metadata Delta, enriches invoice_id/invoice_date, quarantines nulls, writes Silver Delta.",
+      "notebook_task": {
+        "notebook_path": "/Shared/silver_transformation/06_silver_blob_invoices_job_params_v3",
+        "base_parameters": {
+          "load_type"       : "incremental",
+          "ingestion_year"  : "{{job.start_time.iso_date | date_format: 'yyyy'}}",
+          "ingestion_month" : "{{job.start_time.iso_date | date_format: 'MM'}}",
+          "ingestion_day"   : "{{job.start_time.iso_date | date_format: 'dd'}}"
+        },
+        "source": "WORKSPACE"
+      },
+      "existing_cluster_id": "<your-dev-cluster-id>",
+      "timeout_seconds": 1800,
+      "max_retries": 1,
+      "min_retry_interval_millis": 300000
+    }
+  ],
+
+  "job_clusters": [],
+
+  "email_notifications": {
+    "on_failure": ["<your-email@domain.com>"],
+    "no_alert_for_skipped_runs": true
+  },
+
+  "max_concurrent_runs": 1,
+
+  "tags": {
+    "layer"  : "silver",
+    "source" : "blob",
+    "entity" : "invoices",
+    "day"    : "9"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "ds_pipeline_audit_csv_noheader",
+  "properties": {
+    "description": "Write-only CSV dataset for act_write_audit source. Same file as ds_pipeline_audit_csv but firstRowAsHeader is false so ADF sees no pre-existing column names. This prevents the duplicate key error when additionalColumns injects pipeline_name and other columns that already exist in the CSV header schema.",
+    "linkedServiceName": {
+      "referenceName": "ls_adls_bronze",
+      "type": "LinkedServiceReference"
+    },
+    "type": "DelimitedText",
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "fileSystem": "bronze",
+        "folderPath": "audit",
+        "fileName": "pipeline_audit.csv"
+      },
+      "columnDelimiter": ",",
+      "rowDelimiter": "\n",
+      "firstRowAsHeader": false,
+      "quoteChar": "\"",
+      "escapeChar": "\\"
+    }
+  }
+}
