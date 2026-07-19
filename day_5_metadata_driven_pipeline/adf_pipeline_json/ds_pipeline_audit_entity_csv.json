@@ -1,0 +1,30 @@
+{
+  "name": "ds_pipeline_audit_entity_csv",
+  "properties": {
+    "description": "Per-entity watermark CSV. Each entity has its own file at bronze/audit/watermark_<entity_name>.csv containing exactly one data row — the latest successful watermark for that entity. This fixes the firstRowOnly bug in the shared pipeline_audit.csv where all entities read the same row 1.",
+    "linkedServiceName": {
+      "referenceName": "ls_adls_bronze",
+      "type": "LinkedServiceReference"
+    },
+    "parameters": {
+      "p_entity_name": { "type": "string" }
+    },
+    "type": "DelimitedText",
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "fileSystem": "bronze",
+        "folderPath": "audit",
+        "fileName": {
+          "value": "@concat('watermark_', dataset().p_entity_name, '.csv')",
+          "type": "Expression"
+        }
+      },
+      "columnDelimiter": ",",
+      "rowDelimiter": "\n",
+      "firstRowAsHeader": true,
+      "quoteChar": "\"",
+      "escapeChar": "\\"
+    }
+  }
+}

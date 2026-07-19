@@ -1,17 +1,16 @@
 {
-  "name": "pl_bronze_api_payments_v3",
+  "name": "pl_bronze_api_ingest_v4",
   "properties": {
-    "description": "Payments API to Bronze. Full load on first run. Incremental reads watermark automatically from bronze/audit/pipeline_audit.csv via Lookup Activity (ls_adls_bronze). Audit row appended to same CSV via Copy Activity after every run (success or failure). No Databricks linked service required.",
+    "description": "Child pipeline — called by pl_bronze_api_master_v4 once per entity. Handles auth, watermark lookup, paginated copy, and audit write for ONE entity. All entity-specific values come in as parameters. Never triggered directly.",
     "parameters": {
-      "p_load_type": {
-        "type": "string",
-        "defaultValue": "incremental",
-        "description": "full or incremental"
-      }
+      "p_entity_name":   { "type": "string",  "description": "e.g. payments, sessions, customers" },
+      "p_api_path":      { "type": "string",  "description": "e.g. /api/db/payments/" },
+      "p_page_size":     { "type": "int",     "defaultValue": 500 },
+      "p_load_type":     { "type": "string",  "defaultValue": "incremental", "description": "full or incremental" }
     },
     "variables": {
       "v_token":          { "type": "String" },
-      "v_watermark":      { "type": "String", "defaultValue": "1900-01-01T00:00:00Z" },
+      "v_watermark":      { "type": "String",  "defaultValue": "1900-01-01T00:00:00Z" },
       "v_ingestion_date": { "type": "String" },
       "v_current_page":   { "type": "Integer", "defaultValue": 1 },
       "v_temp_page":      { "type": "Integer", "defaultValue": 1 },
@@ -54,7 +53,7 @@
 
       {
         "name": "act_api_login",
-        "description": "POST credentials to VoltGrid login. Response body contains token field.",
+        "description": "POST credentials to VoltGrid login. Token is shared across all entity calls in this run.",
         "type": "WebActivity",
         "dependsOn": [
           { "activity": "act_get_password", "dependencyConditions": ["Succeeded"] }
@@ -87,7 +86,7 @@
 
       {
         "name": "act_set_ingestion_date",
-        "description": "Capture today UTC date once. Used as Bronze partition folder name for all pages this run.",
+        "description": "Capture today UTC date once. Used as Bronze partition folder for all pages this entity run.",
         "type": "SetVariable",
         "dependsOn": [
           { "activity": "act_set_token", "dependencyConditions": ["Succeeded"] }
@@ -103,7 +102,7 @@
 
       {
         "name": "act_get_watermark",
-        "description": "Lookup Activity — reads the first row of bronze/audit/pipeline_audit.csv via ls_adls_bronze. Returns watermark_value column from the last audit row. Used by act_set_watermark to resolve the incremental watermark. For full loads the output is ignored.",
+        "description": "Lookup — reads bronze/audit/pipeline_audit_<entity_name>.csv which is a per-entity single-row watermark file. Each entity has its own file so firstRowOnly always returns the correct watermark for this entity. This avoids the multi-entity CSV firstRowOnly bug.",
         "type": "Lookup",
         "dependsOn": [
           { "activity": "act_set_ingestion_date", "dependencyConditions": ["Succeeded"] }
@@ -121,8 +120,14 @@
             }
           },
           "dataset": {
-            "referenceName": "ds_pipeline_audit_csv",
-            "type": "DatasetReference"
+            "referenceName": "ds_pipeline_audit_entity_csv",
+            "type": "DatasetReference",
+            "parameters": {
+              "p_entity_name": {
+                "value": "@pipeline().parameters.p_entity_name",
+                "type": "Expression"
+              }
+            }
           },
           "firstRowOnly": true
         }
@@ -130,7 +135,7 @@
 
       {
         "name": "act_set_watermark",
-        "description": "For full load: use epoch constant. For incremental: use watermark_value from the CSV Lookup result.",
+        "description": "Full load: epoch constant. Incremental: use watermark_value from the per-entity audit CSV.",
         "type": "SetVariable",
         "dependsOn": [
           { "activity": "act_get_watermark", "dependencyConditions": ["Succeeded"] }
@@ -146,14 +151,14 @@
 
       {
         "name": "act_get_total_pages",
-        "description": "Call page 1 of payments API with the resolved watermark to read pagination.total_pages before starting the loop.",
+        "description": "Call page 1 of the parameterized entity API to read pagination.total_pages before the loop.",
         "type": "WebActivity",
         "dependsOn": [
           { "activity": "act_set_watermark", "dependencyConditions": ["Succeeded"] }
         ],
         "typeProperties": {
           "url": {
-            "value": "@concat('https://ev-project-navy-mu.vercel.app/api/db/payments/?page=1&page_size=100&updated_after=', variables('v_watermark'))",
+            "value": "@concat('https://ev-project-navy-mu.vercel.app', pipeline().parameters.p_api_path, '?page=1&page_size=', string(pipeline().parameters.p_page_size), '&updated_after=', variables('v_watermark'))",
             "type": "Expression"
           },
           "method": "GET",
@@ -183,7 +188,7 @@
 
       {
         "name": "act_paginate",
-        "description": "Loop through all pages until v_current_page exceeds v_total_pages.",
+        "description": "Loop through all pages of this entity until v_current_page exceeds v_total_pages.",
         "type": "Until",
         "dependsOn": [
           { "activity": "act_set_total_pages", "dependencyConditions": ["Succeeded"] }
@@ -196,7 +201,8 @@
           "activities": [
 
             {
-              "name": "act_copy_payments_page",
+              "name": "act_copy_entity_page",
+              "description": "Copy one page of entity data from REST API to Bronze ADLS. Source and sink paths are fully parameterized.",
               "type": "Copy",
               "dependsOn": [],
               "typeProperties": {
@@ -222,22 +228,24 @@
               },
               "inputs": [
                 {
-                  "referenceName": "ds_voltgrid_payments_src_v3",
+                  "referenceName": "ds_voltgrid_api_src_v4",
                   "type": "DatasetReference",
                   "parameters": {
-                    "p_page":          { "value": "@variables('v_current_page')", "type": "Expression" },
-                    "p_page_size":     100,
-                    "p_updated_after": { "value": "@variables('v_watermark')",     "type": "Expression" }
+                    "p_api_path":      { "value": "@pipeline().parameters.p_api_path",        "type": "Expression" },
+                    "p_page":          { "value": "@variables('v_current_page')",              "type": "Expression" },
+                    "p_page_size":     { "value": "@pipeline().parameters.p_page_size",        "type": "Expression" },
+                    "p_updated_after": { "value": "@variables('v_watermark')",                 "type": "Expression" }
                   }
                 }
               ],
               "outputs": [
                 {
-                  "referenceName": "ds_bronze_payments_sink_v3",
+                  "referenceName": "ds_bronze_api_sink_v4",
                   "type": "DatasetReference",
                   "parameters": {
-                    "p_ingestion_date": { "value": "@variables('v_ingestion_date')", "type": "Expression" },
-                    "p_page":           { "value": "@variables('v_current_page')",   "type": "Expression" }
+                    "p_entity_name":    { "value": "@pipeline().parameters.p_entity_name",    "type": "Expression" },
+                    "p_ingestion_date": { "value": "@variables('v_ingestion_date')",           "type": "Expression" },
+                    "p_page":           { "value": "@variables('v_current_page')",             "type": "Expression" }
                   }
                 }
               ]
@@ -247,7 +255,7 @@
               "name": "act_set_temp_page",
               "type": "SetVariable",
               "dependsOn": [
-                { "activity": "act_copy_payments_page", "dependencyConditions": ["Succeeded"] }
+                { "activity": "act_copy_entity_page", "dependencyConditions": ["Succeeded"] }
               ],
               "typeProperties": {
                 "variableName": "v_temp_page",
@@ -280,7 +288,7 @@
 
       {
         "name": "act_set_status_success",
-        "description": "Mark run succeeded after Until loop completes normally.",
+        "description": "Mark this entity run as succeeded after the Until loop completes normally.",
         "type": "SetVariable",
         "dependsOn": [
           { "activity": "act_paginate", "dependencyConditions": ["Succeeded"] }
@@ -293,7 +301,7 @@
 
       {
         "name": "act_set_status_failed",
-        "description": "Mark run failed if Until loop or any upstream activity fails.",
+        "description": "Mark this entity run as failed if the Until loop or any upstream activity fails.",
         "type": "SetVariable",
         "dependsOn": [
           { "activity": "act_paginate", "dependencyConditions": ["Failed"] }
@@ -306,7 +314,7 @@
 
       {
         "name": "act_write_audit",
-        "description": "Copy Activity — appends one audit row to bronze/audit/pipeline_audit.csv via ls_adls_bronze. Runs after either status activity (Succeeded or Skipped) so it always executes. additionalColumns adds only the new dynamic columns not already in the CSV header.",
+        "description": "Append one audit row to the shared pipeline_audit.csv. Always runs whether entity succeeded or failed.",
         "type": "Copy",
         "dependsOn": [
           { "activity": "act_set_status_success", "dependencyConditions": ["Succeeded", "Skipped"] },
@@ -316,14 +324,65 @@
           "source": {
             "type": "DelimitedTextSource",
             "additionalColumns": [
-              { "name": "pipeline_name",   "value": "pl_bronze_api_payments_v3" },
-              { "name": "load_type",       "value": { "value": "@pipeline().parameters.p_load_type",  "type": "Expression" } },
-              { "name": "watermark_value", "value": { "value": "@variables('v_watermark')",            "type": "Expression" } },
-              { "name": "ingestion_date",  "value": { "value": "@variables('v_ingestion_date')",       "type": "Expression" } },
-              { "name": "total_pages",     "value": { "value": "@string(variables('v_total_pages'))",  "type": "Expression" } },
-              { "name": "status",          "value": { "value": "@variables('v_status')",               "type": "Expression" } },
-              { "name": "pipeline_run_id", "value": { "value": "@pipeline().RunId",                    "type": "Expression" } },
-              { "name": "run_timestamp",   "value": { "value": "@utcNow()",                            "type": "Expression" } }
+              { "name": "pipeline_name",   "value": "pl_bronze_api_master_v4" },
+              { "name": "entity_name",     "value": { "value": "@pipeline().parameters.p_entity_name", "type": "Expression" } },
+              { "name": "load_type",       "value": { "value": "@pipeline().parameters.p_load_type",   "type": "Expression" } },
+              { "name": "watermark_value", "value": { "value": "@variables('v_watermark')",             "type": "Expression" } },
+              { "name": "ingestion_date",  "value": { "value": "@variables('v_ingestion_date')",        "type": "Expression" } },
+              { "name": "total_pages",     "value": { "value": "@string(variables('v_total_pages'))",   "type": "Expression" } },
+              { "name": "status",          "value": { "value": "@variables('v_status')",                "type": "Expression" } },
+              { "name": "pipeline_run_id", "value": { "value": "@pipeline().RunId",                     "type": "Expression" } },
+              { "name": "run_timestamp",   "value": { "value": "@utcNow()",                             "type": "Expression" } }
+            ],
+            "storeSettings": {
+              "type": "AzureBlobFSReadSettings",
+              "recursive": false,
+              "enablePartitionDiscovery": false
+            },
+            "formatSettings": {
+              "type": "DelimitedTextReadSettings"
+            }
+          },
+          "sink": {
+            "type": "DelimitedTextSink",
+            "storeSettings": { "type": "AzureBlobFSWriteSettings" },
+            "formatSettings": {
+              "type": "DelimitedTextWriteSettings",
+              "quoteAllText": true,
+              "fileExtension": ".csv"
+            }
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_audit_template_csv",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_pipeline_audit_csv",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+
+      {
+        "name": "act_write_watermark",
+        "description": "Overwrite bronze/audit/watermark_<entity_name>.csv with a single row containing the current run_timestamp as the new watermark_value. Only runs on success so a failed run never advances the watermark. Next incremental run reads this file via ds_pipeline_audit_entity_csv to get the correct per-entity watermark.",
+        "type": "Copy",
+        "dependsOn": [
+          { "activity": "act_write_audit", "dependencyConditions": ["Succeeded"] },
+          { "activity": "act_set_status_success", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "DelimitedTextSource",
+            "additionalColumns": [
+              { "name": "watermark_value", "value": { "value": "@utcNow()", "type": "Expression" } },
+              { "name": "entity_name",     "value": { "value": "@pipeline().parameters.p_entity_name", "type": "Expression" } },
+              { "name": "updated_at",      "value": { "value": "@utcNow()", "type": "Expression" } }
             ],
             "storeSettings": {
               "type": "AzureBlobFSReadSettings",
@@ -341,7 +400,7 @@
             },
             "formatSettings": {
               "type": "DelimitedTextWriteSettings",
-              "quoteAllText": false,
+              "quoteAllText": true,
               "fileExtension": ".csv"
             }
           },
@@ -349,14 +408,20 @@
         },
         "inputs": [
           {
-            "referenceName": "ds_pipeline_audit_csv_noheader",
+            "referenceName": "ds_audit_template_csv",
             "type": "DatasetReference"
           }
         ],
         "outputs": [
           {
-            "referenceName": "ds_pipeline_audit_csv",
-            "type": "DatasetReference"
+            "referenceName": "ds_pipeline_audit_entity_csv",
+            "type": "DatasetReference",
+            "parameters": {
+              "p_entity_name": {
+                "value": "@pipeline().parameters.p_entity_name",
+                "type": "Expression"
+              }
+            }
           }
         ]
       }
